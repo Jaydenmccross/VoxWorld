@@ -1,0 +1,1 @@
+Just a simple at home project that is a clone of Minecraft. I hope to add a few fun things in the process. Still learning coding on boot.dev and doing the best I can. Always appreciate suggestions and help. This is currently being coded in Python and using Ursina/Panda3d engine.
