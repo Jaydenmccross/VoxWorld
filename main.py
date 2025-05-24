@@ -1,38 +1,4 @@
 #############################################
-#           main.py - Complete Script       #
-#############################################
-
-import os, json, time, random
-from math import floor, sin, cos, pi, radians, exp
-from collections import deque
-
-# Try to import ijson for streaming JSON parsing; if unavailable, warn.
-try:
-    import ijson
-except ImportError:
-    print("[WARNING] ijson not installed. Streaming mode will use full JSON load.")
-    ijson = None
-
-# Import from Ursina and Panda3D:
-from ursina import *
-from ursina.prefabs.first_person_controller import FirstPersonController
-from ursina.prefabs.editor_camera import EditorCamera
-from ursina import InputField  # Use InputField directly from ursina.
-from panda3d.core import Shader as PandaShader
-
-# Import perlin noise functions.
-from noise import pnoise2, pnoise3
-
-#############################################
-# Directional Helper Function (Compass)
-#############################################
-def get_cardinal(angle):
-    angle = angle % 360
-    directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-    index = int((angle + 22.5) // 45) % 8
-    return directions[index]
-
-#############################################
 # 1) Initialize Ursina Application
 #############################################
 app = Ursina()
@@ -88,6 +54,11 @@ greenwool_texture         = safe_load_texture('assets/greenwool.png')
 purplewool_texture        = safe_load_texture('assets/purplewool.png')
 redwool_texture           = safe_load_texture('assets/redwool.png')
 
+# Conceptual new textures for biomes (map to existing ones for now)
+snow_texture = safe_load_texture('assets/white_wool.png') # Assuming white wool exists, or use another placeholder
+if not snow_texture: snow_texture = stone_texture # Fallback
+sandstone_texture = safe_load_texture('assets/sand.png') # Placeholder, use sand if no specific sandstone
+
 print(f"[DEBUG] Water texture loaded: {water_texture is not None}")
 
 #############################################
@@ -122,10 +93,12 @@ texture_mapping = {
     'greenwool': greenwool_texture,
     'purplewool': purplewool_texture,
     'redwool': redwool_texture,
-    'door': None,
-    'pokeball': None,
-    'foxfox': None,
-    'particleblock': purplewool_texture
+    'door': None, # Special entity, no direct texture in this map
+    'pokeball': None, # Special entity
+    'foxfox': None, # Special entity
+    'particleblock': purplewool_texture, # Example
+    'snow': snow_texture, # New biome block
+    'sandstone': sandstone_texture # New biome block
 }
 
 # Define collectible blocks for drop/pickup logic.
@@ -133,7 +106,8 @@ collectible_blocks = ['dirt','grass','stone','sponge','crackedtile','darkshingle
                       'lightwood','treetrunkdark','treetrunklight','treeleaves','crackedglyphs',
                       'emerald','gold','redbrick','redcement','ruby','sand','seashells','steel',
                       'stripedwatercolor','yellowwool','blackfiligree','bluewool','greenwool',
-                      'purplewool','redwool']
+                      'purplewool','redwool',
+                      'snow', 'sandstone'] # Added new biome blocks
 
 #############################################
 # 3) Custom Shaders
@@ -220,14 +194,15 @@ POKEBALL = 'pokeball'
 FOXFOX   = 'foxfox'
 PARTICLE_BLOCK = 'particleblock'
 
-BLOCK_TYPES = [
+BLOCK_TYPES = [ # Ensure this list is comprehensive for inventory/UI purposes
     'dirt','grass','stone','water','sponge',
     'crackedtile','darkshingle','darkwood','lightwood',
     'treetrunkdark','treetrunklight','treeleaves',
     'crackedglyphs','emerald','gold','redbrick','redcement','ruby',
     'sand','seashells','steel','stripedwatercolor','yellowwool',
     'blackfiligree','bluewool','greenwool','purplewool','redwool',
-    DOOR, POKEBALL, FOXFOX, PARTICLE_BLOCK
+    DOOR, POKEBALL, FOXFOX, PARTICLE_BLOCK,
+    'snow', 'sandstone' # Added new biome blocks
 ]
 
 door_entities = {}
@@ -281,7 +256,7 @@ def start_random_music():
     try:
         music_length = current_music.length
     except:
-        music_length = 180
+        music_length = 180 # Default length if not found
 
 def update_music():
     global current_music, music_start_time, music_length
@@ -289,15 +264,23 @@ def update_music():
         if current_music and current_music.playing:
             current_music.pause()
         return
-    else:
+    else: # music_on is True
         if current_music and not current_music.playing:
-            current_music.resume()
-    if current_music:
-        elapsed = time.time() - music_start_time
-        if elapsed >= music_length - 0.1:
+            # Check if it was paused or finished
+            if current_music.time > 0 and current_music.length > 0 and current_music.time < current_music.length:
+                 current_music.resume()
+            else: # Finished or never started properly
+                 start_random_music()
+        elif not current_music: # No music object exists
             start_random_music()
-    else:
+
+    if current_music and current_music.playing: # Check if it's time for the next track
+        elapsed = time.time() - music_start_time
+        if music_length > 0 and elapsed >= music_length - 0.1: # Small buffer
+            start_random_music()
+    elif music_on and not current_music: # If music is on but nothing is playing (e.g. after a track failed to load)
         start_random_music()
+
 
 def init_music():
     if not os.path.exists('assets/sounds'):
@@ -305,16 +288,17 @@ def init_music():
     for fname in os.listdir('assets/sounds'):
         if fname.lower().endswith('.mp3'):
             music_tracks.append(os.path.join('assets/sounds', fname))
-    start_random_music()
+    if music_tracks: # Only start music if tracks were found
+        start_random_music()
 
 def play_sound_once(sound):
-    if not sound.playing:
+    if sound and not sound.playing: # Add a check for sound existence
         sound.play()
 
 #############################################
 # 6b) Water Physics Constants
 #############################################
-WATER_LEVEL = 0.0
+WATER_LEVEL = 0.0 # This might be dynamically set or less relevant with biome water levels
 UNDERWATER_GRAVITY_FACTOR = 0.2
 BUOYANCY = 0.5
 WATER_DRAG = 0.9
@@ -348,12 +332,14 @@ class Door(Entity):
         super().__init__()
         self.base_pos = Vec3(*base_pos)
         self.open = False
-        self.pivot = Entity(position=self.base_pos + Vec3(0.5,0,0.5))
-        self.parent = self.pivot
-        self.scale = (0.25,2,1)
-        self.color = color.rgba(255,0,0,180)
-        self.position = Vec3(0,1,0)
-        self.collider = BoxCollider(self, center=Vec3(0,0,0), size=Vec3(0.25,2,1))
+        self.pivot = Entity(position=self.base_pos + Vec3(0.5,0,0.5)) # Pivot for rotation
+        self.parent = self.pivot # Door model will be parented to pivot
+        self.model = 'cube' # Placeholder, should be a door model
+        self.texture = darkwood_texture # Example texture
+        self.scale = (1,2,0.2) # Example scale for a door panel
+        self.position = Vec3(-0.5,0,0) # Position relative to pivot
+        self.collider = BoxCollider(self, center=Vec3(0.5,1,0.1), size=(1,2,0.2)) # Adjust collider
+        self.color = color.white # Reset color if texture applied
         self.is_animating = False
         self.closed_rotation = 0
         self.open_rotation = -90
@@ -368,26 +354,28 @@ class Door(Entity):
             else:
                 self.pivot.rotation_y += step if diff > 0 else -step
     def toggle(self):
-        door_sound.play()
+        if door_sound: door_sound.play()
         self.is_animating = True
-        if self.open:
+        if self.open: # If open, close it
             self.target_rot = self.closed_rotation
-            self.collider = BoxCollider(self, center=Vec3(0,0,0), size=Vec3(0.25,2,1))
+            # Re-enable collider when closed, adjust its position/size if needed
+            self.collider = BoxCollider(self, center=Vec3(0.5,1,0.1), size=(1,2,0.2))
             self.open = False
-        else:
+        else: # If closed, open it
             self.target_rot = self.open_rotation
-            self.collider = None
+            self.collider = None # Disable collider when open
             self.open = True
 
 class PokeballEntity(Entity):
     def __init__(self, base_pos):
         super().__init__()
         self.base_pos = Vec3(*base_pos)
-        self.position = self.base_pos + Vec3(0.5,0,0.5)
-        self.model = load_model('pokeball.gltf') or 'cube'
-        self.scale = 0.5
-        self.collider = BoxCollider(self, center=Vec3(0,0.5,0), size=Vec3(1,1,1))
-        self.color = color.white
+        self.position = self.base_pos + Vec3(0.5,0.25,0.5) # Centered on block, slightly above ground
+        self.model = load_model('assets/pokeball.gltf') # Ensure this path is correct
+        if not self.model: self.model = 'sphere' # Fallback model
+        self.scale = 0.25 # Smaller scale
+        self.collider = BoxCollider(self, center=Vec3(0,0.5,0), size=Vec3(1,1,1)) # Relative to entity's origin
+        self.color = color.white # In case model has no color/texture
     def rotate_self(self):
         self.rotation_y += 30
 
@@ -395,26 +383,32 @@ class FoxfoxEntity(Entity):
     def __init__(self, base_pos):
         super().__init__()
         self.base_pos = Vec3(*base_pos)
-        self.position = self.base_pos + Vec3(0.5,0,0.5)
-        self.model = load_model('foxfox.gltf') or 'cube'
-        self.scale = 0.75
-        self.collider = BoxCollider(self, center=Vec3(0,0.5,0), size=Vec3(1,1,1))
+        self.position = self.base_pos + Vec3(0.5,0.375,0.5) # Centered, adjust Y based on model
+        self.model = load_model('assets/foxfox.gltf') # Ensure path is correct
+        if not self.model: self.model = 'cube' # Fallback
+        self.scale = 0.375 # Adjust scale
+        self.collider = BoxCollider(self, center=Vec3(0,0.5,0), size=Vec3(1,1,1)) # Relative
         self.color = color.white
     def rotate_self(self):
         self.rotation_y += 30
 
-class ParticleBlockEntity(Entity):
-    def __init__(self, base_pos):
-        super().__init__()
-        self.base_pos = Vec3(*base_pos)
-        self.position = self.base_pos + Vec3(0.5,0,0.5)
-        self.model = 'cube'
-        self.scale = 1
-        self.collider = BoxCollider(self, center=Vec3(0,0,0), size=Vec3(1,1,1))
-        self.settings = {'size': 0.1, 'particle_count': 50, 'start_color': color.red, 'end_color': color.yellow, 'lifetime': 2, 'gravity': 0.1}
-        self.shrink_index = 0
+class ParticleBlockEntity(Entity): # This is a standard block, not an entity to be placed separately usually
+    def __init__(self, base_pos): # This class might be redundant if PARTICLE_BLOCK is just a type
+        super().__init__(model='cube', position=Vec3(*base_pos) + Vec3(0.5,0.5,0.5), texture=purplewool_texture)
+        # This entity is more for *effects* originating from a block, not the block itself.
+        # The actual block 'particleblock' would be part of the chunk mesh.
+        # This class could be used to manage particle emitters AT the block's location.
+        self.settings = {'size': 0.1, 'particle_count': 50, 'start_color': color.red, 
+                         'end_color': color.yellow, 'lifetime': 2, 'gravity': 0.1, 'speed': 1.0}
+        self.shrink_index = 0 
+        # If this entity is meant to BE the block, it needs a collider and to be handled by world.set_block
+        # If it's just an effect manager, it might not need a collider.
+        # For now, assume it's an effect tied to a 'particleblock' type in self.blocks.
+        self.visible = False # The effect manager itself is not visible.
     def update(self):
+        # Logic for spawning particles based on self.settings if this is an emitter
         pass
+
 
 #############################################
 # 9) BFS Water Spread Functions
@@ -422,2056 +416,2498 @@ class ParticleBlockEntity(Entity):
 water_spread_queue = []
 def process_water_spread():
     now = time.time()
-    for ev in water_spread_queue[:]:
+    processed_in_step = 0
+    max_processed_per_step = 10 # Limit water spread per frame
+
+    for ev_idx in range(len(water_spread_queue) -1, -1, -1): # Iterate backwards for safe removal
+        if processed_in_step >= max_processed_per_step:
+            break
+        
+        ev = water_spread_queue[ev_idx]
         if ev['time_to_spread'] <= now:
-            water_spread_queue.remove(ev)
-            pos = ev['pos']
-            dist = ev['dist']
-            direction = ev['direction']
-            if not world.get_block(pos):
-                world.set_block(pos, 'water')
-                if dist > 0:
-                    spread_water_slowly(pos, dist, direction)
-def schedule_water_spread(pos, dist, direction, delay=0.2):
+            water_spread_queue.pop(ev_idx) # Remove event
+            pos_to_fill = ev['pos']
+            dist_remaining = ev['dist']
+            # direction_of_spread = ev['direction'] # Not used in current spread logic
+
+            # Check if block at pos_to_fill is air (None)
+            if world.get_block(pos_to_fill) is None:
+                world.set_block(pos_to_fill, 'water') # Place water block
+                processed_in_step += 1
+                if dist_remaining > 0:
+                    # Schedule further spread from the newly placed water block
+                    # Spread to horizontal neighbors and one block down
+                    # Original function spread_water_slowly had more complex directionality
+                    # This is a simplified re-spread:
+                    simple_spread_offsets = [(1,0,0), (-1,0,0), (0,0,1), (0,0,-1), (0,-1,0)]
+                    for off in simple_spread_offsets:
+                        next_pos = (pos_to_fill[0]+off[0], pos_to_fill[1]+off[1], pos_to_fill[2]+off[2])
+                        # Check if next_pos is air before scheduling
+                        if world.get_block(next_pos) is None:
+                             # Spread with slightly less distance, fixed delay
+                            schedule_water_spread(next_pos, dist_remaining -1, Vec3(0,0,0), delay=0.3)
+
+
+def schedule_water_spread(pos, dist, direction, delay=0.2): # Direction currently not used in simplified spread
+    # Check if a spread event for this position is already scheduled to avoid duplicates
+    for existing_event in water_spread_queue:
+        if existing_event['pos'] == pos:
+            return # Already scheduled for this position
+
     water_spread_queue.append({
         'pos': pos,
         'dist': dist,
-        'direction': direction,
+        'direction': direction, # Retained for potential future use
         'time_to_spread': time.time() + delay
     })
-def spread_water_slowly(source_pos, dist, direction):
-    if dist <= 0:
-        return
-    offsets = [
-        (0,-1,0),
-        (int(direction.x),0,int(direction.z)),
-        (1,0,0),
-        (-1,0,0),
-        (0,0,1),
-        (0,0,-1)
-    ]
-    for off in offsets:
-        nx = source_pos[0] + off[0]
-        ny = source_pos[1] + off[1]
-        nz = source_pos[2] + off[2]
-        schedule_water_spread((nx,ny,nz), dist-1, direction, 0.2)
-def soak_up_water(center_pos, radius=5):
-    visited = set()
-    queue = deque()
-    queue.append((center_pos, 0))
-    offsets = []
-    for dx in [-1,0,1]:
-        for dy in [-1,0,1]:
-            for dz in [-1,0,1]:
-                if dx==0 and dy==0 and dz==0:
+
+# Original spread_water_slowly is effectively replaced by logic in process_water_spread
+# and schedule_water_spread. If more complex directional spread is needed, it would be revived.
+
+def soak_up_water(center_pos, radius=5): # BFS for soaking
+    visited_soak = set()
+    queue_soak = deque()
+    queue_soak.append((center_pos, 0)) # (position, distance_traveled)
+    
+    # 3D offsets for checking all neighbors
+    soak_offsets = []
+    for dx_soak in [-1,0,1]:
+        for dy_soak in [-1,0,1]:
+            for dz_soak in [-1,0,1]:
+                if dx_soak==0 and dy_soak==0 and dz_soak==0:
                     continue
-                offsets.append((dx,dy,dz))
-    while queue:
-        (x,y,z), dist_traveled = queue.popleft()
-        if dist_traveled > radius:
+                soak_offsets.append((dx_soak,dy_soak,dz_soak))
+
+    blocks_soaked = 0
+    while queue_soak:
+        (current_x, current_y, current_z), dist = queue_soak.popleft()
+
+        if dist > radius: # Stop if beyond soak radius
             continue
-        if (x,y,z) in visited:
+        if (current_x, current_y, current_z) in visited_soak: # Already processed
             continue
-        visited.add((x,y,z))
-        if world.get_block((x,y,z))=='water':
-            world.set_block((x,y,z), None)
-        for off in offsets:
-            nx, ny, nz = x+off[0], y+off[1], z+off[2]
-            nd = dist_traveled+1
-            if nd <= radius:
-                queue.append(((nx,ny,nz), nd))
+        visited_soak.add((current_x, current_y, current_z))
+
+        if world.get_block((current_x, current_y, current_z)) == 'water':
+            world.set_block((current_x, current_y, current_z), None) # Remove water
+            blocks_soaked +=1
+
+        # Add neighbors to queue
+        for off_s_x, off_s_y, off_s_z in soak_offsets:
+            next_x, next_y, next_z = current_x + off_s_x, current_y + off_s_y, current_z + off_s_z
+            next_dist = dist + 1
+            if next_dist <= radius: # Only add if within radius
+                queue_soak.append(((next_x, next_y, next_z), next_dist))
+    if blocks_soaked > 0: print(f"Sponge soaked {blocks_soaked} water blocks.")
+
 
 #############################################
 # 10) Bubble Particles
 #############################################
 class BubbleParticle(Entity):
     def __init__(self, start_pos):
-        super().__init__(parent=scene, model='quad', texture='circle',
-                         scale=0.1, position=start_pos, billboard=True)
-        self.color = color.rgba(0,0,255,150)
-        self.lifetime = 1.5
+        super().__init__(parent=scene, model='quad', texture='circle', # Ensure 'circle' texture exists
+                         scale=random.uniform(0.05, 0.15), position=start_pos, billboard=True)
+        self.color = color.rgba(180,180,255,random.randint(100,180)) # Light blueish
+        self.lifetime = random.uniform(1.0, 2.5)
         self.spawn_time = time.time()
-        self.y_vel = 0.6
+        self.y_vel = random.uniform(0.3, 0.8) # Upward velocity
+        self.x_drift = random.uniform(-0.1, 0.1) # Sideways drift
+        self.z_drift = random.uniform(-0.1, 0.1)
+
     def update(self):
-        dt = time.dt
-        self.position += Vec3(0, self.y_vel*dt, 0)
-        if time.time()-self.spawn_time > self.lifetime:
+        dt_bubbles = time.dt
+        self.position += Vec3(self.x_drift*dt_bubbles, self.y_vel*dt_bubbles, self.z_drift*dt_bubbles)
+        
+        age = time.time() - self.spawn_time
+        if age > self.lifetime:
             destroy(self)
             return
-        ratio = (time.time()-self.spawn_time)/self.lifetime
-        self.color = color.rgba(0,0,255,int(150*(1-ratio)))
-def spawn_bubbles():
-    if not player:
-        return
-    for _ in range(3):
-        pivot = player.camera_pivot.world_position
-        offset = player.camera_pivot.forward*1.2 + Vec3(random.uniform(-0.2,0.2),
-                                                        random.uniform(-0.2,0.2),
-                                                        random.uniform(-0.2,0.2))
-        spawn_pos = pivot + offset
-        BubbleParticle(spawn_pos)
+        
+        # Fade out based on age
+        ratio_bubbles = age / self.lifetime
+        self.alpha = 1 - ratio_bubbles
+
+bubble_timer = 0 # Global timer for bubble spawning
+def spawn_bubbles_update(): # Call this in main update loop
+    global bubble_timer
+    if not player or not world: return
+    
+    # Check if player's head is in water
+    player_head_y = player.y + player.height - 0.1 # Approximate head position
+    if world.get_block((floor(player.x), floor(player_head_y), floor(player.z))) == 'water':
+        bubble_timer += time.dt
+        if bubble_timer > 0.5: # Spawn bubbles every 0.5 seconds
+            bubble_timer = 0
+            for _ in range(random.randint(1,3)): # Spawn 1 to 3 bubbles
+                # Spawn bubbles near player's camera/head
+                spawn_pos_bubbles = player.camera_pivot.world_position +                                     player.camera_pivot.forward * random.uniform(0.1, 0.5) +                                     Vec3(random.uniform(-0.3,0.3), 
+                                         random.uniform(-0.2,0.2), 
+                                         random.uniform(-0.3,0.3))
+                BubbleParticle(spawn_pos_bubbles)
+
 
 #############################################
 # 11) Debris and Pickup Items
 #############################################
-class Debris(Entity):
-    def __init__(self, block_position, block_type):
-        super().__init__(collider='box')
-        self.start_time = time.time()
-        self.lifetime = 3.0
-        pos_vec = Vec3(*block_position)
-        self.position = pos_vec + Vec3(random.uniform(-0.05,0.05),
-                                       random.uniform(-0.05,0.05),
-                                       random.uniform(-0.05,0.05))
-        self.model = 'cube'
-        self.scale = 0.05
-        self.velocity = Vec3(random.uniform(-3,3),
-                             random.uniform(3,6),
-                             random.uniform(-3,3))
-        self.angular_velocity = Vec3(random.uniform(-30,30),
-                                     random.uniform(-30,30),
-                                     random.uniform(-30,30))
-        self.gravity = 9.8
-        self.texture = texture_mapping.get(block_type, None)
-        self.color = color.white
+class Debris(Entity): # Visual effect for block breaking
+    def __init__(self, block_world_position, block_type_debris):
+        # Ensure texture exists for debris, fallback if not
+        debris_texture = texture_mapping.get(block_type_debris, stone_texture) 
+        
+        super().__init__(model='cube', texture=debris_texture,
+                         scale=random.uniform(0.05, 0.15),
+                         position=Vec3(*block_world_position) + Vec3(0.5,0.5,0.5)) # Center of block
+        
+        self.start_time_debris = time.time()
+        self.lifetime_debris = random.uniform(0.8, 1.5) # Shorter lifetime for debris
+        
+        # Initial velocity outwards from block center
+        self.velocity_debris = Vec3(random.uniform(-2,2),
+                                    random.uniform(2,5), # Upwards pop
+                                    random.uniform(-2,2))
+        self.angular_velocity_debris = Vec3(random.uniform(-180,180),
+                                            random.uniform(-180,180),
+                                            random.uniform(-180,180))
+        self.gravity_debris = 9.8
+
     def update(self):
-        dt = time.dt
-        ground_level = floor(self.position.y)
-        if self.position.y <= ground_level+0.05 and self.velocity.y < 0:
-            self.velocity.y = -self.velocity.y * 0.7
-            self.velocity.x *= 0.8
-            self.velocity.z *= 0.8
-        self.velocity.y -= self.gravity * dt
-        self.position += self.velocity * dt
-        self.rotation_x += self.angular_velocity.x * dt
-        self.rotation_y += self.angular_velocity.y * dt
-        self.rotation_z += self.angular_velocity.z * dt
-        if time.time()-self.start_time > self.lifetime:
+        dt_debris = time.dt
+        
+        # Basic physics: gravity and velocity
+        self.velocity_debris.y -= self.gravity_debris * dt_debris
+        self.position += self.velocity_debris * dt_debris
+        
+        # Rotation
+        self.rotation_x += self.angular_velocity_debris.x * dt_debris
+        self.rotation_y += self.angular_velocity_debris.y * dt_debris
+        self.rotation_z += self.angular_velocity_debris.z * dt_debris
+        
+        # Lifetime check
+        if time.time() - self.start_time_debris > self.lifetime_debris:
             destroy(self)
 
-# Modified PickupItem: now a small 3D cube with collision and gravity.
-class PickupItem(Entity):
-    def __init__(self, item_type, position):
-        super().__init__(parent=scene, model='cube', texture=texture_mapping.get(item_type),
-                         scale=0.3, position=position)
-        self.item_type = item_type
-        self.velocity = Vec3(0,0,0)
-        self.gravity = 9.8
-        self.pickup_radius = 1.0
-        self.lifetime = 30
-        self.spawn_time = time.time()
-        self.collider = BoxCollider(self)
+class PickupItem(Entity): # Item that can be collected by player
+    def __init__(self, item_type_pickup, world_position_pickup):
+        pickup_texture = texture_mapping.get(item_type_pickup, stone_texture) # Fallback texture
+        
+        super().__init__(parent=scene, model='cube', texture=pickup_texture,
+                         scale=0.25, # Slightly larger than debris
+                         position=Vec3(*world_position_pickup) + Vec3(0.5,0.5,0.5), # Center of block
+                         collider='box' # Add collider for raycast or collision based pickup
+                        )
+        self.item_type_pickup = item_type_pickup
+        self.velocity_pickup = Vec3(random.uniform(-0.5,0.5), 2, random.uniform(-0.5,0.5)) # Slight pop up
+        self.gravity_pickup = 9.8
+        self.pickup_radius_sq = 1.5**2 # Radius for player to pick up (squared for efficiency)
+        self.lifetime_pickup = 45.0 # Longer lifetime for pickups (e.g., 45 seconds)
+        self.spawn_time_pickup = time.time()
+        self.grounded_pickup = False
+
     def update(self):
-        dt = time.dt
-        self.velocity.y -= self.gravity * dt
-        self.position += self.velocity * dt
-        hit = raycast(origin=self.world_position, direction=Vec3(0,-1,0), distance=0.2, ignore=[self])
-        if hit.hit:
-            self.velocity.y = 0
-        if time.time()-self.spawn_time > self.lifetime:
+        dt_pickup = time.dt
+
+        if not self.grounded_pickup:
+            self.velocity_pickup.y -= self.gravity_pickup * dt_pickup
+            self.position += self.velocity_pickup * dt_pickup
+            
+            # Simple ground collision check (assuming ground is around y=integer levels)
+            # This would be more robust with raycasting or checking actual block below
+            block_below_pos = (floor(self.position.x), floor(self.position.y - 0.1), floor(self.position.z))
+            if world.get_block(block_below_pos) is not None:
+                self.position.y = floor(self.position.y) + 0.25 # Settle on ground (adjust 0.25 to half of scale)
+                self.grounded_pickup = True
+                self.velocity_pickup = Vec3(0,0,0) # Stop movement
+
+        # Bobbing animation when grounded
+        if self.grounded_pickup:
+            self.rotation_y += 30 * dt_pickup # Gentle rotation
+            self.position.y = floor(self.position.y) + 0.25 + sin(time.time() * 2) * 0.05 # Bobbing
+
+        # Lifetime check
+        if time.time() - self.spawn_time_pickup > self.lifetime_pickup:
             destroy(self)
             return
-        if player and distance(self.world_position, player.world_position) < self.pickup_radius:
-            if add_item_to_inventory(self.item_type):
-                destroy(self)
+        
+        # Player pickup check
+        if player and distance_xz_sq(self.world_position, player.world_position) < self.pickup_radius_sq:
+            # Check Y distance as well
+            if abs(self.world_position.y - (player.world_position.y + player.height/2)) < player.height:
+                if add_item_to_inventory(self.item_type_pickup):
+                    destroy(self) # Item picked up
 
-def add_item_to_inventory(item_type):
+def distance_xz_sq(pos1, pos2): # Helper for squared XZ distance
+    return (pos1.x - pos2.x)**2 + (pos1.z - pos2.z)**2
+
+
+def add_item_to_inventory(item_type_to_add):
     global inventory_ui
+    if not inventory_ui: return False
+
+    # Try to stack in hotbar first
     for i in range(len(inventory_ui.hotbar_data)):
         slot = inventory_ui.hotbar_data[i]
-        if slot and slot.get('item')==item_type and slot.get('count',1)<100:
-            inventory_ui.hotbar_data[i]['count'] += 1
+        if slot and slot.get('item') == item_type_to_add and slot.get('count', 0) < 100:
+            slot['count'] += 1
+            inventory_ui.update_all_slots()
             return True
+    # Try to add to empty hotbar slot
     for i in range(len(inventory_ui.hotbar_data)):
         if inventory_ui.hotbar_data[i] is None:
-            inventory_ui.hotbar_data[i] = {'item': item_type, 'count': 1}
+            inventory_ui.hotbar_data[i] = {'item': item_type_to_add, 'count': 1}
+            inventory_ui.update_all_slots()
             return True
+            
+    # Try to stack in main inventory
     for i in range(len(inventory_ui.inventory_data)):
         slot = inventory_ui.inventory_data[i]
-        if slot and slot.get('item')==item_type and slot.get('count',1)<100:
-            inventory_ui.inventory_data[i]['count'] += 1
+        if slot and slot.get('item') == item_type_to_add and slot.get('count', 0) < 100:
+            slot['count'] += 1
+            inventory_ui.update_all_slots()
             return True
+    # Try to add to empty main inventory slot
     for i in range(len(inventory_ui.inventory_data)):
         if inventory_ui.inventory_data[i] is None:
-            inventory_ui.inventory_data[i] = {'item': item_type, 'count': 1}
+            inventory_ui.inventory_data[i] = {'item': item_type_to_add, 'count': 1}
+            inventory_ui.update_all_slots()
             return True
-    print("Inventory full, cannot pick up", item_type)
+            
+    print(f"Inventory full. Cannot pick up {item_type_to_add}.")
     return False
 
-def spawn_pickup(item_type, position):
-    PickupItem(item_type, (position[0]+0.5, position[1]+0.5, position[2]+0.5))
+def spawn_pickup(item_type_to_spawn, block_world_pos_spawn):
+    # Spawn slightly above the block's original position
+    pickup_spawn_pos = (block_world_pos_spawn[0], block_world_pos_spawn[1] + 0.5, block_world_pos_spawn[2])
+    PickupItem(item_type_to_spawn, pickup_spawn_pos)
+
 
 #############################################
 # Helper Class: SlotOutline
 #############################################
 class SlotOutline(Entity):
     def __init__(self, parent, thickness=0.01, outline_color=color.lime, **kwargs):
-        super().__init__(parent=parent, **kwargs)
+        super().__init__(parent=parent, **kwargs) # Pass kwargs to Entity
         self.thickness = thickness
         self.outline_color = outline_color
-        self.top = Entity(parent=self, model='quad', color=self.outline_color, scale=(0.11, thickness), position=(0, 0.11/2, 0))
-        self.bottom = Entity(parent=self, model='quad', color=self.outline_color, scale=(0.11, thickness), position=(0, -0.11/2, 0))
-        self.left_border = Entity(parent=self, model='quad', color=self.outline_color, scale=(thickness, 0.11), position=(-0.11/2, 0, 0))
-        self.right_border = Entity(parent=self, model='quad', color=self.outline_color, scale=(thickness, 0.11), position=(0.11/2, 0, 0))
+        # Create border parts, ensure Z is behind slot content slightly if needed
+        z_offset_border = -0.01 
+        self.top_border = Entity(parent=self, model='quad', color=self.outline_color, 
+                                scale=(1, self.thickness), position=(0, 0.5 - self.thickness/2, z_offset_border), origin=(0,0))
+        self.bottom_border = Entity(parent=self, model='quad', color=self.outline_color, 
+                                   scale=(1, self.thickness), position=(0, -0.5 + self.thickness/2, z_offset_border), origin=(0,0))
+        self.left_border = Entity(parent=self, model='quad', color=self.outline_color, 
+                                 scale=(self.thickness, 1 - 2*self.thickness), position=(-0.5 + self.thickness/2, 0, z_offset_border), origin=(0,0))
+        self.right_border = Entity(parent=self, model='quad', color=self.outline_color, 
+                                  scale=(self.thickness, 1 - 2*self.thickness), position=(0.5 - self.thickness/2, 0, z_offset_border), origin=(0,0))
+        # Scale the SlotOutline itself to match the slot size it outlines
+        self.scale = (0.11, 0.11) # Match InventorySlotUI scale by default
+
 
 #############################################
 # 12) Inventory UI System (Hotbar + Main Inventory)
 #############################################
 class InventorySlotUI(Button):
-    def __init__(self, slot_data, **kwargs):
+    def __init__(self, slot_data_ref, **kwargs): # slot_data_ref is a direct reference to the list item
         super().__init__(model='quad', **kwargs)
-        self.slot_data = slot_data
-        self.scale = (0.11, 0.11)
-        self.background_color = color.rgba(0,0,0,150)
-        self.texture_scale = (1,1)
-        self.count_text = None
+        self.slot_data_ref = slot_data_ref # Store reference to the actual data slot
+        self.scale = (0.1, 0.1) # Slightly smaller for padding if outline is parent
+        self.background_color = color.rgba(0,0,0,150) # Default background
+        self.texture_scale = (0.9,0.9) # Scale texture within the slot
+        self.count_text_label = None
         self.update_visual()
 
     def update_visual(self):
-        if self.slot_data and self.slot_data.get('item'):
-            self.texture = texture_mapping.get(self.slot_data['item'])
-            self.color = color.white
-            count = self.slot_data.get('count', 1)
-            if self.count_text:
-                destroy(self.count_text)
-            self.count_text = Text(
-                text=str(count),
-                parent=self,
-                origin=(0.4, 0.4),
-                scale=1,
-                color=color.yellow,
-                position=(0.04, 0.04),
-                z=-1
-            )
-        else:
+        current_data = self.slot_data_ref() # Call the lambda to get current data
+        
+        if current_data and current_data.get('item'):
+            item_texture_visual = texture_mapping.get(current_data['item'])
+            self.texture = item_texture_visual if item_texture_visual else None # Use texture if found
+            self.color = color.white if item_texture_visual else color.gray # Gray if no texture
+            
+            item_count_visual = current_data.get('count', 1)
+            if self.count_text_label: # Destroy old text if it exists
+                destroy(self.count_text_label)
+                self.count_text_label = None
+
+            if item_count_visual > 1: # Only show count if more than 1
+                self.count_text_label = Text(
+                    text=str(item_count_visual),
+                    parent=self, # Parent to the slot itself
+                    origin=(0.5, -0.5), # Bottom-right alignment within slot
+                    scale=3, # Scale relative to slot's own scale
+                    position=(0.45, -0.45), # Position in bottom-right
+                    z = -0.1, # Ensure text is on top
+                    color=color.yellow
+                )
+        else: # Slot is empty
             self.texture = None
-            self.color = color.rgba(0,0,0,150)
-            if self.count_text:
-                destroy(self.count_text)
-                self.count_text = None
-        self.border_color = color.white
+            self.color = color.rgba(0,0,0,150) # Empty slot color
+            if self.count_text_label:
+                destroy(self.count_text_label)
+                self.count_text_label = None
+        
+        # self.border_color = color.white # Default border for Button, can be customized
 
 class InventoryUI(Entity):
     def __init__(self):
-        super().__init__(parent=camera.ui)
+        super().__init__(parent=camera.ui) # Main container for all inventory UI
+        
+        # Data for hotbar (9 slots) and main inventory (27 slots)
         self.hotbar_data = [None for _ in range(9)]
-        self.hotbar_elements = []
+        self.inventory_data = [None for _ in range(27)] # 3 rows of 9
+
+        self.hotbar_elements_ui = [] # Ursina Button entities for hotbar
+        self.inventory_elements_ui = [] # Ursina Button entities for main inventory
+
+        hotbar_y_pos = -0.45
+        slot_size_ui = 0.10
+        slot_spacing_ui = 0.01
+        total_slot_dim_ui = slot_size_ui + slot_spacing_ui
+
+        # Create Hotbar UI
         for i in range(9):
-            pos_x = -0.5 + i*0.12
-            slot = InventorySlotUI(self.hotbar_data[i], parent=self, position=(pos_x, -0.45))
-            self.hotbar_elements.append(slot)
-        self.hotbar_selected = 0
-        self.hotbar_highlight = SlotOutline(parent=self, position=self.hotbar_elements[0].position)
-        self.inventory_data = [None for _ in range(27)]
-        self.inventory_panel = Panel(parent=camera.ui, scale=(0.65,0.65),
-                                      color=color.rgba(0,0,0,0), enabled=False)
-        self.inventory_elements = []
-        cell_size = 0.12
-        grid_cols = 9
-        grid_rows = 3
-        start_x = -0.5
-        start_y = 0.3
+            pos_x_hotbar = (-4 * total_slot_dim_ui) + (i * total_slot_dim_ui) # Centered hotbar
+            # Pass a lambda that gets the current data for this slot
+            slot_ui_hotbar = InventorySlotUI(lambda i=i: self.hotbar_data[i], 
+                                             parent=self, position=(pos_x_hotbar, hotbar_y_pos), scale=slot_size_ui)
+            self.hotbar_elements_ui.append(slot_ui_hotbar)
+
+        self.hotbar_selected_index = 0
+        # Highlight for selected hotbar slot
+        self.hotbar_highlight_ui = Entity(parent=self, model='quad', color=color.rgba(255,255,0,100), 
+                                        scale=(slot_size_ui*1.1, slot_size_ui*1.1), z=0.1) # Slightly behind slots
+        self.update_hotbar_highlight_pos()
+
+
+        # Main Inventory Panel (initially disabled)
+        self.inventory_panel_ui = Entity(parent=camera.ui, scale=(total_slot_dim_ui * 9.5, total_slot_dim_ui * 3.5),
+                                        color=color.rgba(50,50,50,200), enabled=False) # Dark semi-transparent panel
+        
+        # Create Main Inventory UI Slots (parented to inventory_panel_ui)
+        start_x_inv = - (total_slot_dim_ui * 9 / 2) + slot_size_ui / 2 
+        start_y_inv = (total_slot_dim_ui * 3 / 2) - slot_size_ui / 2 - total_slot_dim_ui * 0.2 # Adjust Y to be within panel
+
         for i in range(27):
-            row = i // grid_cols
-            col = i % grid_cols
-            pos_x = start_x + col * cell_size
-            pos_y = start_y - row * cell_size
-            slot = InventorySlotUI(self.inventory_data[i], parent=self.inventory_panel, position=(pos_x, pos_y))
-            self.inventory_elements.append(slot)
-        self.dragged_item = None
-        self.dragged_slot = None
-        self.inventory_open = False
+            row_inv = i // 9
+            col_inv = i % 9
+            pos_x_inv = start_x_inv + col_inv * total_slot_dim_ui
+            pos_y_inv = start_y_inv - row_inv * total_slot_dim_ui
+            slot_ui_inv = InventorySlotUI(lambda i=i: self.inventory_data[i],
+                                          parent=self.inventory_panel_ui, position=(pos_x_inv, pos_y_inv), scale=slot_size_ui)
+            self.inventory_elements_ui.append(slot_ui_inv)
+            
+        self.dragged_item_data = None # Holds {'item': type, 'count': num}
+        self.dragged_item_origin_is_hotbar = False # True if from hotbar, False if from main inv
+        self.dragged_item_origin_idx = -1
+        self.drag_icon_ui = None # Entity for visual drag icon
+        self.inventory_open_state = False # Tracks if main inventory is open
+
+    def update_hotbar_highlight_pos(self):
+         # Position highlight over the selected hotbar slot
+        selected_slot_entity = self.hotbar_elements_ui[self.hotbar_selected_index]
+        self.hotbar_highlight_ui.position = selected_slot_entity.position
+        self.hotbar_highlight_ui.z = selected_slot_entity.z + 0.01 # Ensure highlight is slightly behind slot content
 
     def toggle_inventory(self):
-        self.inventory_open = not self.inventory_open
-        self.inventory_panel.enabled = self.inventory_open
-        if self.inventory_open:
-            player.disable()
+        self.inventory_open_state = not self.inventory_open_state
+        self.inventory_panel_ui.enabled = self.inventory_open_state
+        
+        if self.inventory_open_state:
+            if player: player.disable()
             mouse.locked = False
             mouse.visible = True
-        else:
-            player.enable()
+            self.update_all_slots() # Refresh visuals when opening
+        else: # Closing inventory
+            if player: player.enable()
             mouse.locked = True
             mouse.visible = False
+            # If an item was being dragged, return it to origin or find new slot
+            if self.dragged_item_data:
+                self.return_dragged_item() 
 
-    def update_hotbar(self):
-        for i, slot in enumerate(self.hotbar_elements):
-            slot.slot_data = self.hotbar_data[i]
-            slot.update_visual()
-        self.hotbar_highlight.position = self.hotbar_elements[self.hotbar_selected].position
 
-    def update_inventory(self):
-        for i, slot in enumerate(self.inventory_elements):
-            slot.slot_data = self.inventory_data[i]
-            slot.update_visual()
+    def update_all_slots(self): # Call to refresh all slot visuals
+        for slot_widget in self.hotbar_elements_ui:
+            slot_widget.update_visual()
+        for slot_widget in self.inventory_elements_ui:
+            slot_widget.update_visual()
+        self.update_hotbar_highlight_pos()
 
-    def update(self):
-        self.update_hotbar()
-        self.update_inventory()
-        if self.dragged_item:
-            if not hasattr(self, 'drag_icon') or self.drag_icon is None:
-                self.drag_icon = Entity(parent=camera.ui, model='quad', scale=(0.11,0.11),
-                                        texture=texture_mapping.get(self.dragged_item.get('item')),
-                                        color=color.white, z=-1)
-                self.drag_icon.ignore = True
-            else:
-                self.drag_icon.texture = texture_mapping.get(self.dragged_item.get('item'))
-            self.drag_icon.position = mouse.position
-        else:
-            if hasattr(self, 'drag_icon') and self.drag_icon:
-                destroy(self.drag_icon)
-                self.drag_icon = None
 
-    # New Inventory Drag/Drop Input
-    def input(self, key):
-        if self.inventory_open:
-            if key == 'left mouse down':
-                for slot in self.inventory_elements + self.hotbar_elements:
-                    if slot.hovered:
-                        self.dragged_slot = slot
-                        if slot.slot_data:
-                            self.dragged_item = slot.slot_data.copy()
-                            slot.slot_data = None
-                            slot.update_visual()
-                        break
-            elif key == 'left mouse up':
-                if self.dragged_item:
-                    target = None
-                    for slot in self.inventory_elements + self.hotbar_elements:
-                        if slot.hovered:
-                            target = slot
-                            break
-                    if target:
-                        if not target.slot_data:
-                            target.slot_data = self.dragged_item
-                            target.update_visual()
-                        else:
-                            if target.slot_data.get('item') == self.dragged_item.get('item'):
-                                total = target.slot_data.get('count', 1) + self.dragged_item.get('count', 1)
-                                if total <= 100:
-                                    target.slot_data['count'] = total
-                                    self.dragged_item = None
-                                else:
-                                    target.slot_data['count'] = 100
-                                    self.dragged_item['count'] = total - 100
-                            else:
-                                old_target = target.slot_data
-                                target.slot_data = self.dragged_item
-                                if self.dragged_slot:
-                                    self.dragged_slot.slot_data = old_target
-                                    self.dragged_slot.update_visual()
-                            target.update_visual()
-                    else:
-                        if self.dragged_slot:
-                            self.dragged_slot.slot_data = self.dragged_item
-                            self.dragged_slot.update_visual()
-                    self.dragged_item = None
-                    self.dragged_slot = None
-            elif key == 'right mouse down':
-                if self.dragged_item and self.dragged_item.get('count', 1) > 1:
-                    target = None
-                    for slot in self.inventory_elements + self.hotbar_elements:
-                        if slot.hovered and not slot.slot_data:
-                            target = slot
-                            break
-                    if target:
-                        split_amount = self.dragged_item['count'] // 2
-                        target.slot_data = {
-                            'item': self.dragged_item['item'],
-                            'count': split_amount
-                        }
-                        self.dragged_item['count'] -= split_amount
-                        target.update_visual()
-                        if self.dragged_slot:
-                            self.dragged_slot.update_visual()
+    def update(self): # Main update for InventoryUI (e.g., drag icon position)
+        if self.inventory_open_state: # Only update drag icon if inventory is open
+            if self.dragged_item_data:
+                if not self.drag_icon_ui: # Create drag icon if it doesn't exist
+                    item_tex = texture_mapping.get(self.dragged_item_data['item'])
+                    self.drag_icon_ui = Entity(parent=camera.ui, model='quad', 
+                                               texture=item_tex if item_tex else None,
+                                               color=color.white if item_tex else color.dark_gray,
+                                               scale=(0.08, 0.08), z=-0.2) # Ensure on top
+                    self.drag_icon_ui.ignore = True # So it doesn't block hovering other slots
+                
+                # Update drag icon texture if item changed (shouldn't happen mid-drag)
+                # self.drag_icon_ui.texture = texture_mapping.get(self.dragged_item_data['item'])
+                self.drag_icon_ui.position = mouse.position # Follow mouse
+            else: # No item being dragged
+                if self.drag_icon_ui: # Destroy icon if it exists
+                    destroy(self.drag_icon_ui)
+                    self.drag_icon_ui = None
+        elif self.drag_icon_ui : # Inventory closed but drag icon exists (shouldn't happen if return_dragged_item works)
+             destroy(self.drag_icon_ui)
+             self.drag_icon_ui = None
+
+
+    def handle_click_on_slot(self, slot_list_data, slot_idx, is_hotbar_list):
+        clicked_slot_current_data = slot_list_data[slot_idx]
+
+        if not self.dragged_item_data: # Not dragging anything -> Pick up from this slot
+            if clicked_slot_current_data: # If slot has an item
+                self.dragged_item_data = clicked_slot_current_data.copy() # Take the whole stack
+                slot_list_data[slot_idx] = None # Empty the clicked slot
+                self.dragged_item_origin_is_hotbar = is_hotbar_list
+                self.dragged_item_origin_idx = slot_idx
+        else: # Currently dragging an item -> Try to place in this slot
+            if not clicked_slot_current_data: # Target slot is empty
+                slot_list_data[slot_idx] = self.dragged_item_data # Place whole stack
+                self.dragged_item_data = None # Item placed
+            else: # Target slot has an item -> Try to stack or swap
+                if clicked_slot_current_data['item'] == self.dragged_item_data['item']: # Same item type
+                    can_take = 100 - clicked_slot_current_data['count']
+                    if can_take > 0:
+                        take_amount = min(can_take, self.dragged_item_data['count'])
+                        clicked_slot_current_data['count'] += take_amount
+                        self.dragged_item_data['count'] -= take_amount
+                        if self.dragged_item_data['count'] <= 0:
+                            self.dragged_item_data = None # All of dragged item stacked
+                else: # Different item types -> Swap
+                    # Store target slot's item temporarily
+                    temp_item_from_target_slot = clicked_slot_current_data.copy()
+                    # Place dragged item into target slot
+                    slot_list_data[slot_idx] = self.dragged_item_data
+                    # Now, the item originally from target slot becomes the new dragged item
+                    self.dragged_item_data = temp_item_from_target_slot
+                    # Origin of this new dragged item is the slot we just interacted with
+                    self.dragged_item_origin_is_hotbar = is_hotbar_list
+                    self.dragged_item_origin_idx = slot_idx
+        self.update_all_slots()
+
+
+    def return_dragged_item(self):
+        if self.dragged_item_data:
+            origin_list = self.hotbar_data if self.dragged_item_origin_is_hotbar else self.inventory_data
+            
+            if origin_list[self.dragged_item_origin_idx] is None: # Original slot is still empty
+                origin_list[self.dragged_item_origin_idx] = self.dragged_item_data
+            else: # Original slot was filled, try to add to any empty slot or stack
+                if not add_item_to_inventory(self.dragged_item_data['item']): # This needs to handle count too
+                    # If cannot add (e.g. full), for now, just drop it (log it)
+                    print(f"Could not return dragged item {self.dragged_item_data['item']} to inventory. Item lost (or implement drop).")
+
+            self.dragged_item_data = None
+            if self.drag_icon_ui:
+                destroy(self.drag_icon_ui)
+                self.drag_icon_ui = None
+            self.update_all_slots()
+
+
+    def input(self, key): # Input handling when inventory is open
+        if not self.inventory_open_state: return
+
+        if key == 'left mouse down':
+            # Check hotbar slots
+            for i, slot_widget in enumerate(self.hotbar_elements_ui):
+                if slot_widget.hovered:
+                    self.handle_click_on_slot(self.hotbar_data, i, True)
+                    return 
+            # Check main inventory slots
+            for i, slot_widget in enumerate(self.inventory_elements_ui):
+                if slot_widget.hovered:
+                    self.handle_click_on_slot(self.inventory_data, i, False)
+                    return
+            # If clicked outside any slot and dragging an item, return it
+            if self.dragged_item_data and not mouse.hovered_entity:
+                 self.return_dragged_item()
+
+        elif key == 'right mouse down':
+            if self.dragged_item_data: # If dragging a stack, try to place one item
+                target_slot_widget = None
+                target_list_data = None
+                target_idx = -1
+                is_hotbar_target = False
+
+                for i, slot_widget in enumerate(self.hotbar_elements_ui):
+                    if slot_widget.hovered:
+                        target_slot_widget = slot_widget; target_list_data = self.hotbar_data; 
+                        target_idx = i; is_hotbar_target = True; break
+                if not target_slot_widget:
+                    for i, slot_widget in enumerate(self.inventory_elements_ui):
+                        if slot_widget.hovered:
+                            target_slot_widget = slot_widget; target_list_data = self.inventory_data; 
+                            target_idx = i; is_hotbar_target = False; break
+                
+                if target_slot_widget:
+                    if target_list_data[target_idx] is None: # Target is empty
+                        target_list_data[target_idx] = {'item': self.dragged_item_data['item'], 'count': 1}
+                        self.dragged_item_data['count'] -= 1
+                    elif target_list_data[target_idx]['item'] == self.dragged_item_data['item'] and                          target_list_data[target_idx]['count'] < 100: # Target has same item, can stack
+                        target_list_data[target_idx]['count'] += 1
+                        self.dragged_item_data['count'] -= 1
+                    
+                    if self.dragged_item_data['count'] <= 0:
+                        self.dragged_item_data = None # All items placed one by one
+                    self.update_all_slots()
+
 
 #############################################
 # 13) Custom Player with New Swimming Logic
 #############################################
 class CustomPlayer(FirstPersonController):
     def __init__(self):
-        super().__init__(model="character.glb", jump_height=1.2, speed=15)
-        self.last_click_time = 0
+        super().__init__(model="character.glb", jump_height=1.5, speed=8, jump_duration=0.4) # Tuned jump
+        self.collider = BoxCollider(self, center=Vec3(0,1,0), size=Vec3(0.8,1.8,0.8)) # Standard player size
+        self.cursor.visible = False # Hide default FPC cursor if using custom UI
+
+        self.last_click_time = 0 # For block interaction cooldown
+        # Third person camera setup
         self.is_third_person = False
-        self.third_person_offset = Vec3(0, 1.5, -4)
-        self.first_person_offset = Vec3(0, 1.5, 0)
-        self.transition_speed = 4
-        self.collider = BoxCollider(self, center=Vec3(0,1,0), size=Vec3(0.6,2,0.6))
-        self.gravity = 1
-        self.water_check_offsets = [0, 0.5, 1, 1.5]
-        self.was_underwater = False
-        self.swim_velocity = 0
-        self.max_swim_speed = 5
-        self.swim_acceleration = 10
-        self.water_drag = 2
-        self.buoyancy = 9
-        self.water_level = 0
-        self.surface_bob_height = 1.2
-        self.surface_bob_strength = 3
+        self.default_cam_pivot_pos = self.camera_pivot.position.y # Store original height
+        self.third_person_cam_dist = 5 
+        self.third_person_cam_height = 1.0 
+
+        # Swimming related attributes
+        self.in_water = False
+        self.was_in_water = False # To detect entry/exit
+        self.buoyancy_force = 12.0 # Upward force in water
+        self.water_friction = 3.0  # Resistance in water - Renamed for clarity
+        self.swim_move_force = 300.0 # Force for swimming movement
+        self.max_swim_speed_vertical = 2.0 # Max speed for bobbing/sinking
+        self.max_swim_speed_horizontal = 4.0 # Max speed for horizontal swimming
+
+
     def update(self):
-        body_checks = []
-        for y_off in self.water_check_offsets:
-            body_checks.append(world.get_block((floor(self.x), floor(self.y + y_off), floor(self.z))))
-        currently_underwater = any(b == 'water' for b in body_checks)
-        head_in_water = (world.get_block((floor(self.x), floor(self.y + 1.5), floor(self.z))) == 'water')
-        if currently_underwater and not self.was_underwater:
-            if waterjump_sound:
-                waterjump_sound.play()
-            self.swim_velocity = 0
-        if currently_underwater:
-            self.gravity = 0.2
-            if held_keys['space']:
-                self.swim_velocity = min(self.swim_velocity + self.swim_acceleration * time.dt, self.max_swim_speed)
-            else:
-                self.swim_velocity = max(self.swim_velocity - self.water_drag * time.dt, 0)
-            self.y += self.swim_velocity * time.dt
-            if head_in_water:
-                target_y = floor(self.y) + self.surface_bob_height
-                y_diff = target_y - self.y
-                self.y += y_diff * self.surface_bob_strength * time.dt
-            else:
-                self.y += self.buoyancy * time.dt
-            self.direction *= 0.8
-        else:
-            self.gravity = 1
-            self.swim_velocity = 0
-        self.was_underwater = currently_underwater
-        super().update()
-        if currently_underwater and not head_in_water:
-            surface_y = floor(self.y + 1.5)
-            if abs(self.y - surface_y) < 0.1:
-                self.y = surface_y
-        target_pos = self.third_person_offset if self.is_third_person else self.first_person_offset
-        self.camera_pivot.position = lerp(self.camera_pivot.position, target_pos, self.transition_speed * time.dt)
+        # Player dimensions based on BoxCollider(center=Vec3(0,1,0), size=Vec3(0.6,2,0.6))
+        # Player's feet are at self.y, player's head top is at self.y + 2.0.
+        player_height = 2.0
+
+        # Upward clipping check
+        if hasattr(self, 'velocity') and self.velocity.y > 0: # Check if FPC uses self.velocity
+            target_head_top_y = self.y + player_height + (self.velocity.y * time.dt)
+            potential_ceiling_block_y = floor(target_head_top_y)
+            block_at_potential_ceiling = world.get_block((floor(self.x), potential_ceiling_block_y, floor(self.z)))
+
+            if block_at_potential_ceiling and block_at_potential_ceiling != 'water':
+                current_head_top_y = self.y + player_height
+                if current_head_top_y <= potential_ceiling_block_y:
+                    self.y = potential_ceiling_block_y - player_height - 0.01 # 0.01 is an epsilon
+                    self.velocity.y = 0 # Stop upward movement
+        
+        # --- Water Physics ---
+        self.check_water_status() # Updates self.in_water
+
+        if self.in_water:
+            if not self.was_in_water: # Just entered water
+                if waterjump_sound: waterjump_sound.play()
+                self.velocity.y *= 0.3 # Dampen vertical speed on entry
+            
+            # Apply buoyancy (counteracts gravity)
+            self.velocity.y += self.buoyancy_force * time.dt
+            # Apply water drag (dampens all movement)
+            self.velocity.x *= (1 - self.water_friction * time.dt)
+            self.velocity.y *= (1 - self.water_friction * time.dt * 0.5) # Less Y drag than buoyancy
+            self.velocity.z *= (1 - self.water_friction * time.dt)
+
+            # Limit vertical speed in water (bobbing/sinking)
+            if abs(self.velocity.y) > self.max_swim_speed_vertical:
+                self.velocity.y = self.max_swim_speed_vertical * sign(self.velocity.y)
+
+            # Swimming controls
+            if held_keys['space']: # Swim up
+                self.velocity.y += self.swim_move_force * 0.05 * time.dt # Adjusted force application
+            # Forward/backward/sideways swimming (uses FPC's direction calculation)
+            # Need to apply force based on player's facing direction
+            # This part is tricky as FPC applies velocity directly.
+            # We might need to adjust FPC's ground_control or air_control when in water.
+            # For now, let's allow FPC's movement but heavily damped by drag.
+            # A more advanced approach would be custom movement logic here.
+            
+        self.was_in_water = self.in_water
+        
+        # --- Call base FPC update AFTER water physics modifications ---
+        # Modify gravity for FPC based on water status for THIS frame
+        original_gravity = self.gravity
+        if self.in_water:
+            self.gravity = original_gravity * UNDERWATER_GRAVITY_FACTOR # Reduced gravity in water
+        
+        super().update() # This applies gravity, movement according to FPC logic
+        
+        self.gravity = original_gravity # Restore original gravity for next frame's logic
+
+        # Head-knocker prevention (reactive, after super().update())
+        # Player feet at self.y, head top at self.y + player_height (2.0)
+        player_height = 2.0 # Define it again in case it's needed locally
+        
+        head_check_world_y = self.y + player_height - 0.1 
+        head_block_coord = (floor(self.x), floor(head_check_world_y), floor(self.z))
+        block_at_head = world.get_block(head_block_coord)
+
+        if block_at_head and block_at_head != 'water':
+            feet_check_world_y = self.y + 0.1 
+            feet_block_coord = (floor(self.x), floor(feet_check_world_y), floor(self.z))
+            block_at_feet = world.get_block(feet_block_coord)
+
+            if not block_at_feet or block_at_feet == 'water':
+                if hasattr(self, 'previous_position') and self.previous_position != self.position:
+                    self.position = self.previous_position
+                else:
+                    self.y = floor(head_check_world_y) - player_height - 0.01
+
+                if hasattr(self, 'velocity') and self.velocity.y > 0:
+                     self.velocity.y = 0
+        
+        # --- Camera Perspective ---
         if self.is_third_person:
-            behind_pos = self.camera_pivot.world_position
-            behind_dir = -self.camera_pivot.forward
-            hit = raycast(origin=behind_pos, direction=behind_dir, ignore=[self], distance=1.5)
-            if hit.hit and hit.entity and hit.entity.collider != 'box':
-                self.camera_pivot.position += behind_dir * 0.3
+            target_cam_pos = self.position + Vec3(0, self.third_person_cam_height, 0) - (self.forward * self.third_person_cam_dist)
+            # Simple obstacle avoidance for camera (raycast from player to target_cam_pos)
+            cam_hit = raycast(self.world_position + Vec3(0,self.height/2,0) , (target_cam_pos - self.world_position).normalized(), 
+                              distance=self.third_person_cam_dist, ignore=[self])
+            if cam_hit.hit:
+                self.camera_pivot.world_position = lerp(self.camera_pivot.world_position, cam_hit.world_point - self.forward*0.2, time.dt * 10)
+            else:
+                self.camera_pivot.world_position = lerp(self.camera_pivot.world_position, target_cam_pos, time.dt * 10)
+            self.camera_pivot.rotation_x = self.rotation_x # Match player pitch
+        else: # First person
+            self.camera_pivot.position = Vec3(0, self.default_cam_pivot_pos, 0) # Reset to default relative pos
+        
+        # Fall damage (example, can be expanded)
+        if self.air_time > self.jump_duration + 0.3 and self.velocity.y < -10: # If falling fast after jump peak
+            # print(f"High fall, velocity Y: {self.velocity.y}")
+            # Implement fall damage logic here
+            pass
+
+
+    def check_water_status(self):
+        if not world: self.in_water = False; return
+
+        # Check points around player for water contact
+        # Feet, waist, head level checks
+        positions_to_check = [
+            self.position + Vec3(0, 0.1, 0),  # Feet
+            self.position + Vec3(0, self.height * 0.5, 0), # Waist
+            self.position + Vec3(0, self.height * 0.9, 0)  # Head
+        ]
+        self.in_water = False
+        for pos_w_check in positions_to_check:
+            block_at_pos = world.get_block((floor(pos_w_check.x), floor(pos_w_check.y), floor(pos_w_check.z)))
+            if block_at_pos == 'water':
+                self.in_water = True
+                break
+    
+    def input(self, key): # Player specific inputs (like camera toggle)
+        super().input(key) # Allow FPC to handle its inputs (movement, jump)
+        if key == 'f5': # Toggle camera perspective
+            self.is_third_person = not self.is_third_person
+            if self.is_third_person:
+                self.camera_pivot.parent = scene # Detach from player's direct rotation for smoothing
+            else:
+                self.camera_pivot.parent = self # Re-attach for first person
+                self.camera_pivot.rotation = (0,0,0) # Reset local rotation
+
 
 #############################################
 # 14) Free Camera
 #############################################
 free_cam_mode = False
-free_cam = None
-class CustomEditorCamera(EditorCamera):
+free_cam = None # Will hold the EditorCamera instance
+class CustomEditorCamera(EditorCamera): # Inherit for any customizations
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.speed = 10
-    def update(self):
-        super().update()
-        if held_keys['w']:
-            self.position += self.forward * self.speed * time.dt
-        if held_keys['s']:
-            self.position -= self.forward * self.speed * time.dt
-        if held_keys['a']:
-            self.position -= self.right * self.speed * time.dt
-        if held_keys['d']:
-            self.position += self.right * self.speed * time.dt
-        if held_keys['space']:
-            self.position += Vec3(0, self.speed * time.dt, 0)
-        if held_keys['shift']:
-            self.position += Vec3(0, -self.speed * time.dt, 0)
+        self.speed = 20 # Faster default speed
+        self.zoom_speed = 1 # Keep zoom speed reasonable
+
+    def update(self): # EditorCamera has its own update, call it
+        super().update() 
+        # Add custom controls if needed, e.g., shift for speed boost
+        current_speed = self.speed
+        if held_keys['left shift'] or held_keys['right shift']:
+            current_speed *= 3
+        
+        # Movement relative to camera's own orientation
+        if held_keys['w']: self.position += self.forward * current_speed * time.dt
+        if held_keys['s']: self.position -= self.forward * current_speed * time.dt
+        if held_keys['d']: self.position += self.right * current_speed * time.dt
+        if held_keys['a']: self.position -= self.right * current_speed * time.dt
+        if held_keys['e'] or held_keys['space']: self.position += self.up * current_speed * time.dt # Move up
+        if held_keys['q'] or held_keys['c']: self.position -= self.up * current_speed * time.dt     # Move down
+
+
 def toggle_free_camera():
     global free_cam_mode, free_cam, player
-    if not free_cam_mode:
-        free_cam = CustomEditorCamera()
-        free_cam.position = player.camera_pivot.world_position
-        free_cam.rotation = player.camera_pivot.world_rotation
-        player.disable()
-        mouse.locked = True
-        mouse.visible = False
-        free_cam_mode = True
-    else:
-        if free_cam:
-            free_cam.disable()
-            free_cam = None
-        player.enable()
-        mouse.locked = True
-        mouse.visible = False
-        free_cam_mode = False
+    
+    free_cam_mode = not free_cam_mode
+    if free_cam_mode:
+        if player: player.disable() # Disable player when free cam is on
+        if not free_cam: # Create free_cam if it doesn't exist
+            free_cam = CustomEditorCamera(rotation_speed=200, enabled=True)
+        free_cam.enabled = True
+        free_cam.position = player.camera_pivot.world_position if player else camera.position
+        free_cam.rotation = player.camera_pivot.world_rotation if player else camera.rotation
+        mouse.locked = False # Unlock mouse for free cam
+        mouse.visible = True
+        print("Free Camera Activated.")
+    else: # Turning free cam OFF
+        if free_cam: free_cam.disable()
+        if player: 
+            player.enable() # Re-enable player
+            mouse.locked = True
+            mouse.visible = False
+        else: # No player, just revert mouse state
+            mouse.locked = False 
+            mouse.visible = True
+        print("Free Camera Deactivated.")
+
 
 #############################################
-# 15) Simplified Water Functions
+# 15) Simplified Water Functions (debug_init_water_entity, update_water_mesh)
+# These are now OBSOLETE due to combined mesh in Chunk.build_mesh()
+# They can be safely removed or commented out.
 #############################################
-def debug_init_water_entity(chunk):
-    try:
-        chunk.water_entity = Entity(
-            model=None,
-            texture=water_texture,
-            color=color.rgba(60,120,255,180),
-            double_sided=True,
-            transparency=True
-        )
-        return True
-    except Exception as e:
-        print(e)
-        return False
-
-def update_water_mesh(chunk, water_mesh):
-    try:
-        if water_mesh and water_mesh.vertices:
-            chunk.water_entity.model = water_mesh
-            chunk.water_entity.visible = True
-            return True
-        else:
-            chunk.water_entity.visible = False
-            chunk.water_entity.model = None
-            return False
-    except Exception as e:
-        print(e)
-        return False
 
 #############################################
 # 16) Voxel World Classes (Chunk, World, etc.)
 #############################################
-def generate_terrain_height(x, z, seed, max_height):
-    base_freq = 0.015
-    hill_freq = 0.05
-    detail_freq = 0.1
-    base = pnoise2(x*base_freq, z*base_freq, octaves=1, base=seed)
-    hill = pnoise2(x*hill_freq, z*hill_freq, octaves=1, base=seed+1)
-    detail = pnoise2(x*detail_freq, z*detail_freq, octaves=1, base=seed+2)
-    combined = 0.7*base + 0.2*hill + 0.1*detail
-    sigmoid = 1/(1+exp(-combined*5))
-    height = int(sigmoid * max_height)
-    if height < 1:
-        height = 1
-    return height
+from math import ceil # Added for atlas calculation
+
+# Global constant for terrain generation, can be tuned
+BIOME_NOISE_FREQUENCY = 0.008 # Controls the size of biomes
+
+def generate_terrain_height(x, z, seed, max_terrain_height): # Renamed for clarity
+    base_freq_height = 0.012
+    hill_freq_height = 0.04
+    detail_freq_height = 0.08
+    
+    # Multiple noise layers for more interesting height variation
+    base_noise = pnoise2(x * base_freq_height, z * base_freq_height, octaves=2, persistence=0.5, lacunarity=2.0, base=seed)
+    hill_noise = pnoise2(x * hill_freq_height, z * hill_freq_height, octaves=3, persistence=0.4, lacunarity=2.0, base=seed + 1)
+    detail_noise = pnoise2(x * detail_freq_height, z * detail_freq_height, octaves=4, persistence=0.3, lacunarity=2.0, base=seed + 2)
+    
+    # Combine noise layers with different weights
+    # base_noise is usually -1 to 1. Scale to 0-1 for combining.
+    combined_noise = ( (base_noise + 1)/2 * 0.6 +    # Base terrain shape
+                       (hill_noise + 1)/2 * 0.3 +    # Hills and valleys
+                       (detail_noise + 1)/2 * 0.1 )  # Finer details
+    
+    # Apply a non-linear transformation (e.g., power) to shape terrain
+    # Power > 1 flattens valleys and sharpens peaks. Power < 1 does opposite.
+    shaped_noise = combined_noise ** 1.2 # Experiment with this value
+    
+    # Scale to desired max_terrain_height
+    # Ensure minimum height (e.g., at least 1 block above world bottom if using -max_height)
+    # Let's assume height is relative to y=0 for simplicity here.
+    # So, final height is how many blocks *above* y=0.
+    calculated_height = floor(shaped_noise * max_terrain_height)
+    
+    # Ensure height is at least a minimum, e.g. 1, so there's always a ground layer
+    # This depends on how y-coordinates are handled (0 as sea level vs. 0 as world bottom)
+    # If max_terrain_height is the height *above* a base_level (e.g. y=0 is water plane)
+    final_height = max(1, calculated_height) 
+    return final_height
+
 
 class Chunk:
-    def __init__(self, world_ref, chunk_pos, generate_terrain=True):
-        self.world = world_ref
-        self.chunk_pos = chunk_pos
-        self.blocks = {}
-        if not debug_init_water_entity(self):
-            self.water_entity = Entity(model=None)
-        self.dirt_entity = Entity(model=None, texture=dirt_texture, collider='mesh')
-        self.grass_entity = Entity(model=None, texture=grass_texture, collider='mesh')
-        self.sponge_entity = Entity(model=None, collider='mesh')
-        if sponge_texture:
-            self.sponge_entity.texture = sponge_texture
-        else:
-            self.sponge_entity.color = color.yellow
-        self.stone_entity = Entity(model=None, collider='mesh')
-        if stone_texture:
-            self.stone_entity.texture = stone_texture
-        else:
-            self.stone_entity.color = color.gray
-        self.crackedtile_entity = Entity(model=None, collider='mesh')
-        if crackedtile_texture:
-            self.crackedtile_entity.texture = crackedtile_texture
-        else:
-            self.crackedtile_entity.color = color.rgb(100,100,100)
-        self.darkshingle_entity = Entity(model=None, collider='mesh')
-        if darkshingle_texture:
-            self.darkshingle_entity.texture = darkshingle_texture
-        else:
-            self.darkshingle_entity.color = color.rgb(40,40,40)
-        self.darkwood_entity = Entity(model=None, collider='mesh')
-        if darkwood_texture:
-            self.darkwood_entity.texture = darkwood_texture
-        else:
-            self.darkwood_entity.color = color.brown
-        self.lightwood_entity = Entity(model=None, collider='mesh')
-        if lightwood_texture:
-            self.lightwood_entity.texture = lightwood_texture
-        else:
-            self.lightwood_entity.color = color.rgb(200,180,130)
-        self.treetrunkdark_entity = Entity(model=None, collider='mesh')
-        if treetrunkdark_texture:
-            self.treetrunkdark_entity.texture = treetrunkdark_texture
-        else:
-            self.treetrunkdark_entity.color = color.rgb(60,35,20)
-        self.treetrunklight_entity = Entity(model=None, collider='mesh')
-        if treetrunklight_texture:
-            self.treetrunklight_entity.texture = treetrunklight_texture
-        else:
-            self.treetrunklight_entity.color = color.rgb(140,120,100)
-        self.treeleaves_entity = Entity(model=None, collider='mesh')
-        if treeleaves_texture:
-            self.treeleaves_entity.texture = treeleaves_texture
-        else:
-            self.treeleaves_entity.color = color.green
-        self.crackedglyphs_entity = Entity(model=None, texture=crackedglyphs_texture, collider='mesh')
-        self.emerald_entity = Entity(model=None, texture=emerald_texture, collider='mesh')
-        self.gold_entity = Entity(model=None, texture=gold_texture, collider='mesh')
-        self.redbrick_entity = Entity(model=None, texture=redbrick_texture, collider='mesh')
-        self.redcement_entity = Entity(model=None, texture=redcement_texture, collider='mesh')
-        self.ruby_entity = Entity(model=None, texture=ruby_texture, collider='mesh')
-        self.sand_entity = Entity(model=None, texture=sand_texture, collider='mesh')
-        self.seashells_entity = Entity(model=None, texture=seashells_texture, collider='mesh')
-        self.steel_entity = Entity(model=None, texture=steel_texture, collider='mesh')
-        self.stripedwatercolor_entity = Entity(model=None, texture=stripedwatercolor_texture, collider='mesh')
-        self.yellowwool_entity = Entity(model=None, texture=yellowwool_texture, collider='mesh')
-        self.blackfiligree_entity = Entity(model=None, texture=blackfiligree_texture, collider='mesh')
-        self.bluewool_entity = Entity(model=None, texture=bluewool_texture, collider='mesh')
-        self.greenwool_entity = Entity(model=None, texture=greenwool_texture, collider='mesh')
-        self.purplewool_entity = Entity(model=None, texture=purplewool_texture, collider='mesh')
-        self.redwool_entity = Entity(model=None, texture=redwool_texture, collider='mesh')
-        if generate_terrain:
+    def __init__(self, world_ref, chunk_pos, generate_terrain_on_init=True): # Renamed arg
+        self.world = world_ref # Reference to the VoxelWorld instance
+        self.chunk_pos = chunk_pos # Base position of this chunk (e.g., (0,0), (16,0))
+        self.blocks = {} # Dictionary to store blocks: (world_x,y,z) -> block_type_string
+
+        # Combined mesh entity for opaque terrain using a texture atlas
+        self.opaque_terrain_entity = Entity(model=None, collider='mesh', shader=block_lighting_shader,
+                                            texture='atlas_texture.png', static=True)
+        
+        # Entity for water (transparent blocks)
+        self.water_entity = Entity(model=None, texture=water_texture, 
+                                   color=color.rgba(60,120,255,180), # Water color and alpha
+                                   double_sided=True, transparency=True, static=True)
+       
+        if generate_terrain_on_init:
             self.generate_terrain()
+
     def generate_terrain(self):
-        seed = 42
-        max_height = 20
-        water_level = int(0.4 * max_height)
-        for x in range(CHUNK_SIZE):
-            for z in range(CHUNK_SIZE):
-                wx = self.chunk_pos[0] + x
-                wz = self.chunk_pos[1] + z
-                height = generate_terrain_height(wx, wz, seed, max_height)
-                top_block = 'grass' if height > water_level else 'water'
-                for y in range(-max_height, height):
-                    if y == height-1:
-                        self.blocks[(wx,y,wz)] = top_block
-                    elif height-y <= 5:
-                        self.blocks[(wx,y,wz)] = 'dirt'
-                    else:
-                        self.blocks[(wx,y,wz)] = 'stone'
-                for y in range(height, water_level):
-                    self.blocks[(wx,y,wz)] = 'water'
-        self.carve_caves(seed)
-        self.place_trees_in_chunk(seed)
-    def carve_caves(self, seed):
-        cave_threshold = 0.8
-        cave_freq = 0.04
-        surface_heights = {}
-        for (x,y,z), block in self.blocks.items():
-            if block == 'grass':
-                key = (x,z)
-                if key not in surface_heights or y > surface_heights[key]:
-                    surface_heights[key] = y
-        new_blocks = {}
-        for (x,y,z), block in self.blocks.items():
-            if block in ['stone','dirt']:
-                if (x,z) in surface_heights and y > surface_heights[(x,z)] - 8:
-                    new_blocks[(x,y,z)] = block
-                    continue
-                if self.is_near_water((x,y,z), 3):
-                    new_blocks[(x,y,z)] = block
-                    continue
-                noise_val = pnoise3(x*cave_freq, y*cave_freq, z*cave_freq, base=seed+100)
-                if noise_val > cave_threshold:
-                    probability = (noise_val-cave_threshold)/(1-cave_threshold)
-                    if random.random() < probability:
-                        new_blocks[(x,y,z)] = None
-                    else:
-                        new_blocks[(x,y,z)] = block
-                else:
-                    new_blocks[(x,y,z)] = block
-            else:
-                new_blocks[(x,y,z)] = block
-        self.blocks = new_blocks
-        for (x,z), surface_y in surface_heights.items():
-            if self.blocks.get((x,surface_y,z))=='grass':
-                if random.random() < 0.05:
-                    mouth_radius = random.randint(1,2)
-                    mouth_depth = random.randint(1,2)
-                    for dx in range(-mouth_radius, mouth_radius+1):
-                        for dz in range(-mouth_radius, mouth_radius+1):
-                            for dy in range(1, mouth_depth+1):
-                                pos = (x+dx, surface_y-dy, z+dz)
-                                if self.blocks.get(pos) not in [None,'water']:
-                                    self.blocks[pos] = None
-    def is_near_water(self, pos, radius):
-        x,y,z = pos
-        for dx in range(-radius, radius+1):
-            for dy in range(-radius, radius+1):
-                for dz in range(-radius, radius+1):
-                    if (x+dx,y+dy,z+dz) in self.blocks:
-                        if self.blocks[(x+dx,y+dy,z+dz)] == 'water':
-                            return True
-        return False
-    def place_trees_in_chunk(self, seed):
-        tree_seed = seed+200
-        tree_chance_freq = 0.1
-        tree_positions = []
-        for x in range(self.chunk_pos[0], self.chunk_pos[0]+CHUNK_SIZE):
-            for z in range(self.chunk_pos[1], self.chunk_pos[1]+CHUNK_SIZE):
-                col_y = [y for (wx,y,wz) in self.blocks if wx==x and wz==z and self.blocks[(wx,y,wz)] is not None]
-                if not col_y:
-                    continue
-                surface_y = max(col_y)
-                if self.blocks.get((x,surface_y,z)) != 'grass':
-                    continue
-                if any(abs(x-tx)<=2 and abs(z-tz)<=2 for (tx,tz) in tree_positions):
-                    continue
-                can_place = True
-                for ty in range(surface_y+1, surface_y+7):
-                    if (x,ty,z) in self.blocks and self.blocks[(x,ty,z)] is not None:
-                        can_place = False
-                        break
-                if not can_place:
-                    continue
-                tree_noise = pnoise2(x*tree_chance_freq, z*tree_chance_freq, base=tree_seed)
-                if tree_noise > 0.5:
-                    water_level = int(0.4*20)
-                    if surface_y < water_level:
-                        continue
-                    trunk_height = 4
-                    for ty in range(surface_y+1, surface_y+1+trunk_height):
-                        self.blocks[(x,ty,z)] = 'treetrunkdark'
-                    top = surface_y+trunk_height
-                    for lx in range(x-1, x+2):
-                        for lz in range(z-1, z+2):
-                            self.blocks[(lx,top,lz)] = 'treeleaves'
-                    self.blocks[(x,top+1,z)] = 'treeleaves'
-                    tree_positions.append((x,z))
-    def remove(self):
-        destroy(self.water_entity)
-        destroy(self.dirt_entity)
-        destroy(self.grass_entity)
-        destroy(self.sponge_entity)
-        destroy(self.stone_entity)
-        destroy(self.crackedtile_entity)
-        destroy(self.darkshingle_entity)
-        destroy(self.darkwood_entity)
-        destroy(self.lightwood_entity)
-        destroy(self.treetrunkdark_entity)
-        destroy(self.treetrunklight_entity)
-        destroy(self.treeleaves_entity)
-        destroy(self.crackedglyphs_entity)
-        destroy(self.emerald_entity)
-        destroy(self.gold_entity)
-        destroy(self.redbrick_entity)
-        destroy(self.redcement_entity)
-        destroy(self.ruby_entity)
-        destroy(self.sand_entity)
-        destroy(self.seashells_entity)
-        destroy(self.steel_entity)
-        destroy(self.stripedwatercolor_entity)
-        destroy(self.yellowwool_entity)
-        destroy(self.blackfiligree_entity)
-        destroy(self.bluewool_entity)
-        destroy(self.greenwool_entity)
-        destroy(self.purplewool_entity)
-        destroy(self.redwool_entity)
-    def debug_water_mesh_creation(self):
-        submesh_data = {'water': {'verts': [], 'uvs': [], 'norms': [], 'tris': []}}
-        idx_offset = 0
-        for bpos, bdata in self.blocks.items():
-            actual_type = bdata if not isinstance(bdata, dict) else bdata.get("type", bdata)
-            if actual_type != 'water':
-                continue
-            bx,by,bz = bpos
-            for face_name, face_verts in CUBE_FACES.items():
-                nx = bx+FACE_NORMALS[face_name].x
-                ny = by+FACE_NORMALS[face_name].y
-                nz = bz+FACE_NORMALS[face_name].z
-                neighbor = self.world.get_block((nx,ny,nz))
-                if isinstance(neighbor, dict):
-                    neighbor = neighbor.get("type", neighbor)
-                if (neighbor is None) or (neighbor!='water'):
-                    data = submesh_data['water']
-                    base = idx_offset
-                    for i,v in enumerate(face_verts):
-                        vx = bx+v[0]
-                        vy = by+v[1]
-                        vz = bz+v[2]
-                        data['verts'].append((vx,vy,vz))
-                        data['uvs'].append((i in (1,2), i>=2))
-                        data['norms'].append(FACE_NORMALS[face_name])
-                    data['tris'].extend([(base+0, base+1, base+2), (base+2, base+3, base+0)])
-                    idx_offset += 4
-        return submesh_data['water']
-    def build_mesh(self):
-        submesh_data = {
-            'dirt': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'grass': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'stone': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'water': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'sponge': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'crackedtile': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'darkshingle': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'darkwood': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'lightwood': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'treetrunkdark': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'treetrunklight': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'treeleaves': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'crackedglyphs': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'emerald': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'gold': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'redbrick': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'redcement': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'ruby': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'sand': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'seashells': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'steel': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'stripedwatercolor': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'yellowwool': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'blackfiligree': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'bluewool': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'greenwool': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'purplewool': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
-            'redwool': {'verts': [], 'uvs': [], 'norms': [], 'tris': []},
+        seed = 42 # World seed
+        max_height_gen = 30  # Max height of terrain generation from y=0
+        water_level_gen = 10 # Y-level for water surface
+        
+        # Use the global BIOME_NOISE_FREQUENCY
+        biome_freq_local = BIOME_NOISE_FREQUENCY 
+
+        for x_offset_chunk in range(CHUNK_SIZE):
+            for z_offset_chunk in range(CHUNK_SIZE):
+                wx = self.chunk_pos[0] + x_offset_chunk # World X
+                wz = self.chunk_pos[1] + z_offset_chunk # World Z
+
+                # Generate terrain height for this column (relative to y=0)
+                terrain_column_height = generate_terrain_height(wx, wz, seed, max_height_gen)
+                
+                # Biome determination based on noise (temperature, humidity) and height
+                temp_noise_val = (pnoise2(wx * biome_freq_local, wz * biome_freq_local, octaves=2, base=seed + 10) + 1) / 2 # 0-1
+                humidity_noise_val = (pnoise2(wx * biome_freq_local, wz * biome_freq_local, octaves=2, base=seed + 20) + 1) / 2 # 0-1
+
+                current_biome_name = "plains" # Default
+                top_block_terrain = "grass"
+                surface_material_terrain = "dirt"
+                underwater_ground_material = "sand" # Default for under water bodies
+
+                # --- Biome Logic ---
+                # Mountainous terrain (high elevation)
+                if terrain_column_height > max_height_gen * 0.65: 
+                    current_biome_name = "mountains"
+                    if temp_noise_val < 0.35: # Cold high mountains -> Snow
+                        top_block_terrain = "snow"
+                        surface_material_terrain = "snow" # Snow all the way down a bit
+                    else: # Rocky mountains
+                        top_block_terrain = "stone"
+                        surface_material_terrain = "stone"
+                # Desert (hot and dry, not too high)
+                elif temp_noise_val > 0.7 and humidity_noise_val < 0.3 and terrain_column_height <= max_height_gen * 0.5:
+                    current_biome_name = "desert"
+                    top_block_terrain = "sand"
+                    surface_material_terrain = "sandstone" # Or just more 'sand'
+                # Forest (moderate temp, high humidity, not too high)
+                elif temp_noise_val > 0.35 and temp_noise_val < 0.75 and humidity_noise_val > 0.55 and terrain_column_height <= max_height_gen * 0.6:
+                    current_biome_name = "forest"
+                    top_block_terrain = "grass" # Could be 'forest_floor' or 'podzol'
+                    surface_material_terrain = "dirt"
+                # Plains (default for moderate conditions)
+                else: 
+                    current_biome_name = "plains"
+                    top_block_terrain = "grass"
+                    surface_material_terrain = "dirt"
+
+                # Beach areas if land is near water level (and not a mountain)
+                if terrain_column_height > water_level_gen -1 and terrain_column_height <= water_level_gen + 2                     and current_biome_name not in ["mountains", "desert"]: # Beaches don't form on steep mountains
+                    current_biome_name = "beach" # Override biome if it's a beach
+                    top_block_terrain = "sand"
+                    surface_material_terrain = "sand"
+
+
+                # --- Block Placement Loop (from world bottom up to terrain_column_height) ---
+                # Assuming world bottom is at y = -max_height_gen or some negative value.
+                # For simplicity, let's assume y=0 is a base reference, and terrain goes above/below.
+                # Let's define world_bottom_y for clarity.
+                world_bottom_y = -max_height_gen // 2 # Example: terrain can go down to -15 if max_height_gen is 30
+
+                for y_current in range(world_bottom_y, terrain_column_height):
+                    if y_current == terrain_column_height - 1: # Topmost block of the land
+                        self.blocks[(wx, y_current, wz)] = top_block_terrain
+                    elif y_current >= terrain_column_height - 4: # Surface layer (3 blocks below top)
+                        self.blocks[(wx, y_current, wz)] = surface_material_terrain
+                    else: # Deeper underground
+                        self.blocks[(wx, y_current, wz)] = "stone"
+                
+                # --- Water Placement ---
+                # Fill with water from terrain_column_height up to water_level_gen if terrain is below water level
+                if terrain_column_height <= water_level_gen:
+                    for y_water_fill in range(terrain_column_height, water_level_gen + 1):
+                        # Place underwater ground material if this level was meant to be land but is now water due to biome context
+                        if y_water_fill == terrain_column_height -1 and current_biome_name in ["ocean", "lake", "river"]: # A bit redundant, top_block would be this
+                             self.blocks[(wx, y_water_fill, wz)] = underwater_ground_material
+                        else: # Fill with water
+                             self.blocks[(wx, y_water_fill, wz)] = "water"
+                    # Ensure the block just below water surface (if it's land) is appropriate (e.g. sand for beach)
+                    if self.blocks.get((wx, water_level_gen, wz)) == 'water' and                        current_biome_name == "beach": # If it's a beach and water is at water_level_gen
+                        if self.blocks.get((wx, water_level_gen -1, wz)) != 'water': # and block below is land
+                           self.blocks[(wx, water_level_gen -1, wz)] = "sand" # Make it sand
+
+
+        self.carve_caves(seed) 
+        self.place_ores_in_chunk(seed) # Call ore placement
+        self.place_trees_in_chunk(seed, water_level_gen, max_height_gen) # Pass water_level for tree checks
+
+    def place_ores_in_chunk(self, seed):
+        ore_types_info = {
+            'gold': {'texture': gold_texture, 'chance': 0.02, 'min_y': -25, 'max_y': 10, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 50},
+            'emerald': {'texture': emerald_texture, 'chance': 0.015, 'min_y': -30, 'max_y': 5, 'host': ['stone'], 'noise_octaves': 2, 'noise_seed_offset': 60},
+            'ruby': {'texture': ruby_texture, 'chance': 0.018, 'min_y': -28, 'max_y': 8, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 70}
         }
-        idx_offset = { key: 0 for key in submesh_data.keys() }
-        for bpos, bdata in self.blocks.items():
-            actual_type = bdata if not isinstance(bdata, dict) else bdata.get("type", bdata)
-            if actual_type in (DOOR, POKEBALL, FOXFOX):
+        ore_noise_freq = 0.08
+
+        # Iterate over a copy of block positions as self.blocks might be modified
+        block_positions = list(self.blocks.keys()) 
+        for b_pos in block_positions:
+            bx, by, bz = b_pos
+            current_block = self.blocks.get(b_pos) # Use .get() for safety, though key should exist
+
+            if current_block is None: # Skip if block was already removed (e.g. by cavegen)
                 continue
-            if actual_type not in submesh_data:
-                continue
-            bx,by,bz = bpos
-            for face_name, face_verts in CUBE_FACES.items():
-                nx = bx+FACE_NORMALS[face_name].x
-                ny = by+FACE_NORMALS[face_name].y
-                nz = bz+FACE_NORMALS[face_name].z
-                neighbor = self.world.get_block((nx,ny,nz))
-                if isinstance(neighbor, dict):
-                    neighbor = neighbor.get("type", neighbor)
-                if actual_type=='water':
-                    should_draw_face = (neighbor is None) or (neighbor!='water')
-                else:
-                    should_draw_face = (neighbor != actual_type)
-                if not should_draw_face:
+
+            for ore_name, ore_data in ore_types_info.items():
+                if current_block in ore_data['host']:
+                    if ore_data['min_y'] <= by <= ore_data['max_y']:
+                        # pnoise3 returns values between -1 and 1.
+                        noise_val = pnoise3(bx * ore_noise_freq, 
+                                            by * ore_noise_freq, 
+                                            bz * ore_noise_freq, 
+                                            octaves=ore_data['noise_octaves'], 
+                                            base=seed + ore_data['noise_seed_offset'])
+                        
+                        # Normalize noise_val to be 0-1 for comparison with chance
+                        normalized_noise_val = (noise_val + 1) / 2.0 
+                        
+                        # If chance is 0.02 (2%), we want to place ore if noise is in the top 2% of its range.
+                        # So, if normalized_noise_val (0 to 1) is greater than (1.0 - 0.02) = 0.98.
+                        if normalized_noise_val > (1.0 - ore_data['chance']):
+                            self.blocks[b_pos] = ore_name
+                            # The ore_name (e.g., 'gold') should already be in texture_mapping and collectible_blocks
+                            # from the global setup. No need to add them here.
+                            break # Ore placed, no need to check other ore types for this block position
+    
+    def place_ores_in_chunk(self, seed):
+        ore_types_info = {
+            'gold': {'texture': gold_texture, 'chance': 0.02, 'min_y': -25, 'max_y': 10, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 50},
+            'emerald': {'texture': emerald_texture, 'chance': 0.015, 'min_y': -30, 'max_y': 5, 'host': ['stone'], 'noise_octaves': 2, 'noise_seed_offset': 60},
+            'ruby': {'texture': ruby_texture, 'chance': 0.018, 'min_y': -28, 'max_y': 8, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 70}
+        }
+        ore_noise_freq = 0.08
+
+        block_positions = list(self.blocks.keys()) # Iterate over a copy
+        for b_pos in block_positions:
+            bx, by, bz = b_pos
+            current_block = self.blocks.get(b_pos)
+
+            for ore_name, ore_data in ore_types_info.items():
+                if current_block in ore_data['host']:
+                    if ore_data['min_y'] <= by <= ore_data['max_y']:
+                        # pnoise3 returns values between -1 and 1.
+                        noise_val = pnoise3(bx * ore_noise_freq, 
+                                            by * ore_noise_freq, 
+                                            bz * ore_noise_freq, 
+                                            octaves=ore_data['noise_octaves'], 
+                                            base=seed + ore_data['noise_seed_offset'])
+                        
+                        # Normalize noise_val to be 0-1
+                        normalized_noise_val = (noise_val + 1) / 2.0 
+                        
+                        if normalized_noise_val > (1.0 - ore_data['chance']):
+                            self.blocks[b_pos] = ore_name
+                            # Textures and collectible status are handled by global lists/dicts
+                            break # Ore placed, move to next block position
+    
+    def place_ores_in_chunk(self, seed):
+        ore_types_info = {
+            'gold': {'texture': gold_texture, 'chance': 0.02, 'min_y': -25, 'max_y': 10, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 50},
+            'emerald': {'texture': emerald_texture, 'chance': 0.015, 'min_y': -30, 'max_y': 5, 'host': ['stone'], 'noise_octaves': 2, 'noise_seed_offset': 60},
+            'ruby': {'texture': ruby_texture, 'chance': 0.018, 'min_y': -28, 'max_y': 8, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 70}
+        }
+        ore_noise_freq = 0.08
+
+        block_positions = list(self.blocks.keys()) # Iterate over a copy
+        for b_pos in block_positions:
+            bx, by, bz = b_pos
+            current_block = self.blocks.get(b_pos)
+
+            for ore_name, ore_data in ore_types_info.items():
+                if current_block in ore_data['host']:
+                    if ore_data['min_y'] <= by <= ore_data['max_y']:
+                        # pnoise3 returns values between -1 and 1.
+                        noise_val = pnoise3(bx * ore_noise_freq, 
+                                            by * ore_noise_freq, 
+                                            bz * ore_noise_freq, 
+                                            octaves=ore_data['noise_octaves'], 
+                                            base=seed + ore_data['noise_seed_offset'])
+                        
+                        # To use 'chance' as a direct probability (e.g., 0.02 for 2% chance),
+                        # we can scale noise_val (which is -1 to 1) to a 0-1 range,
+                        # and then check if a random number is less than the chance,
+                        # potentially modulated by the noise value to create veins.
+                        # A simpler approach for vein-like structures is to use a threshold on noise.
+                        # If noise_val (raw, -1 to 1) is above a certain high threshold, place ore.
+                        # The provided logic "noise_val > (1.0 - ore_data['chance'])" assumes noise_val is 0-1.
+                        # Let's normalize noise_val to 0-1 for this.
+                        normalized_noise_val = (noise_val + 1) / 2.0 # Now 0.0 to 1.0
+                        
+                        # The condition `normalized_noise_val > (1.0 - ore_data['chance'])` means:
+                        # if chance is 0.02, then 1.0 - chance is 0.98. We need noise > 0.98.
+                        # This makes ore very rare, which is often desired.
+                        if normalized_noise_val > (1.0 - ore_data['chance']):
+                            self.blocks[b_pos] = ore_name
+                            # Global texture_mapping and collectible_blocks should already contain these ores.
+                            break # Ore placed, no need to check other ore types for this block
+    
+    def place_ores_in_chunk(self, seed):
+        ore_types_info = {
+            'gold': {'texture': gold_texture, 'chance': 0.02, 'min_y': -25, 'max_y': 10, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 50},
+            'emerald': {'texture': emerald_texture, 'chance': 0.015, 'min_y': -30, 'max_y': 5, 'host': ['stone'], 'noise_octaves': 2, 'noise_seed_offset': 60},
+            'ruby': {'texture': ruby_texture, 'chance': 0.018, 'min_y': -28, 'max_y': 8, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 70}
+        }
+        ore_noise_freq = 0.08
+
+        block_positions = list(self.blocks.keys()) # Iterate over a copy
+        for b_pos in block_positions:
+            bx, by, bz = b_pos
+            current_block = self.blocks.get(b_pos)
+
+            for ore_name, ore_data in ore_types_info.items():
+                if current_block in ore_data['host']:
+                    if ore_data['min_y'] <= by <= ore_data['max_y']:
+                        noise_val = pnoise3(bx * ore_noise_freq, by * ore_noise_freq, bz * ore_noise_freq, 
+                                            octaves=ore_data['noise_octaves'], base=seed + ore_data['noise_seed_offset'])
+                        # Normalize noise_val to be 0-1 if it's not already (pnoise3 output is -1 to 1)
+                        normalized_noise_val = (noise_val + 1) / 2 
+                        
+                        # Compare with chance. Higher chance means more ore.
+                        # So if normalized_noise_val is very high (close to 1), it's more likely to pass the check.
+                        # If ore_data['chance'] is 0.02, then we need noise > 0.98 for it to be ore.
+                        # This seems reversed. Let's try: if normalized_noise_val < ore_data['chance']
+                        # No, the original logic: noise_val > (1.0 - ore_data['chance']) is correct if noise_val is 0-1
+                        # Let's stick to the brief's example: noise_val > (1.0 - ore_data['chance'])
+                        # but ensure noise_val is in 0-1 range for this comparison.
+                        # So, if pnoise3 gives -1 to 1, then (pnoise3_val + 1) / 2 gives 0 to 1.
+                        if normalized_noise_val > (1.0 - ore_data['chance']):
+                            self.blocks[b_pos] = ore_name
+                            # Textures and collectible status should already be handled by global lists/dicts
+                            break # Ore placed, move to next block position
+    
+    def place_ores_in_chunk(self, seed):
+        ore_types_info = {
+            'gold': {'texture': gold_texture, 'chance': 0.02, 'min_y': -25, 'max_y': 10, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 50},
+            'emerald': {'texture': emerald_texture, 'chance': 0.015, 'min_y': -30, 'max_y': 5, 'host': ['stone'], 'noise_octaves': 2, 'noise_seed_offset': 60},
+            'ruby': {'texture': ruby_texture, 'chance': 0.018, 'min_y': -28, 'max_y': 8, 'host': ['stone'], 'noise_octaves': 1, 'noise_seed_offset': 70}
+        }
+        ore_noise_freq = 0.08
+
+        block_positions = list(self.blocks.keys()) # Iterate over a copy
+        for b_pos in block_positions:
+            bx, by, bz = b_pos
+            current_block = self.blocks.get(b_pos)
+
+            for ore_name, ore_data in ore_types_info.items():
+                if current_block in ore_data['host']:
+                    if ore_data['min_y'] <= by <= ore_data['max_y']:
+                        noise_val = pnoise3(bx * ore_noise_freq, by * ore_noise_freq, bz * ore_noise_freq, 
+                                            octaves=ore_data['noise_octaves'], base=seed + ore_data['noise_seed_offset'])
+                        # Normalize noise_val to be 0-1 if it's not already (pnoise3 output is -1 to 1)
+                        normalized_noise_val = (noise_val + 1) / 2 
+                        
+                        # Compare with chance. Higher chance means more ore.
+                        # So if normalized_noise_val is very high (close to 1), it's more likely to pass the check.
+                        # If ore_data['chance'] is 0.02, then we need noise > 0.98 for it to be ore.
+                        # This seems reversed. Let's try: if normalized_noise_val < ore_data['chance']
+                        # No, the original logic: noise_val > (1.0 - ore_data['chance']) is correct if noise_val is 0-1
+                        # Let's stick to the brief's example: noise_val > (1.0 - ore_data['chance'])
+                        # but ensure noise_val is in 0-1 range for this comparison.
+                        # So, if pnoise3 gives -1 to 1, then (pnoise3_val + 1) / 2 gives 0 to 1.
+                        if normalized_noise_val > (1.0 - ore_data['chance']):
+                            self.blocks[b_pos] = ore_name
+                            # Textures and collectible status should already be handled by global lists/dicts
+                            break # Ore placed, move to next block position
+    
+    def carve_caves(self, seed):
+        cave_noise_freq = 0.05 # Frequency of cave noise
+        cave_threshold_val = 0.75 # Noise values above this become caves
+        
+        # To avoid carving surface too much, find approx surface Y for each column
+        surface_y_map = {}
+        for wx_cave in range(self.chunk_pos[0], self.chunk_pos[0] + CHUNK_SIZE):
+            for wz_cave in range(self.chunk_pos[1], self.chunk_pos[1] + CHUNK_SIZE):
+                max_y_col = -1000
+                for y_col_check in range(30, -30, -1): # Scan a reasonable height range
+                    if (wx_cave, y_col_check, wz_cave) in self.blocks and                        self.blocks[(wx_cave, y_col_check, wz_cave)] != 'water':
+                        max_y_col = y_col_check
+                        break
+                if max_y_col > -1000:
+                    surface_y_map[(wx_cave, wz_cave)] = max_y_col
+        
+        # Iterate through blocks that are 'stone' or 'dirt' (or biome specific like 'sandstone')
+        # Create a copy of keys to iterate over, as self.blocks might change
+        blocks_to_check_for_caves = list(self.blocks.keys())
+
+        for b_pos_key in blocks_to_check_for_caves:
+            bx, by, bz = b_pos_key
+            current_block_type_cave = self.blocks.get(b_pos_key)
+
+            if current_block_type_cave in ['stone', 'dirt', 'sandstone', 'snow']: # Blocks that can be carved
+                # Protect surface layers (e.g., don't carve within 5 blocks of surface)
+                surface_y_current_col = surface_y_map.get((bx,bz), by) # Default to current y if no surface found (should not happen)
+                if by > surface_y_current_col - 6: 
                     continue
-                data = submesh_data[actual_type]
-                base = idx_offset[actual_type]
-                for i,v in enumerate(face_verts):
-                    vx = bx+v[0]
-                    vy = by+v[1]
-                    vz = bz+v[2]
-                    data['verts'].append((vx,vy,vz))
-                    data['uvs'].append((i in (1,2), i>=2))
-                    data['norms'].append(FACE_NORMALS[face_name])
-                data['tris'].extend([(base+0, base+1, base+2), (base+2, base+3, base+0)])
-                idx_offset[actual_type] += 4
-        def make_mesh(d):
-            if not d['verts']:
-                return None
-            return Mesh(vertices=d['verts'], uvs=d['uvs'], normals=d['norms'],
-                        triangles=d['tris'], mode='triangle', static=True)
-        dm = make_mesh(submesh_data['dirt'])
-        if dm:
-            self.dirt_entity.model = dm
-            self.dirt_entity.collider = 'mesh'
-            self.dirt_entity.shader = block_lighting_shader
-            self.dirt_entity.double_sided = True
-            self.dirt_entity.static = True
+
+                # 3D Perlin noise for cave generation
+                cave_noise_3d = pnoise3(bx * cave_noise_freq, 
+                                        by * cave_noise_freq, 
+                                        bz * cave_noise_freq, 
+                                        octaves=2, base=seed + 30)
+                
+                if abs(cave_noise_3d) > cave_threshold_val: # abs() creates more tunnel-like caves
+                    self.blocks[b_pos_key] = None # Carve out block (set to air)
+
+    def is_near_water(self, pos, radius): # Helper to check if near water (used by old cavegen, might be useful)
+        x_check,y_check,z_check = pos
+        for dx_water_check in range(-radius, radius+1):
+            for dy_water_check in range(-radius, radius+1):
+                for dz_water_check in range(-radius, radius+1):
+                    check_pos_water = (x_check+dx_water_check, y_check+dy_water_check, z_check+dz_water_check)
+                    if self.blocks.get(check_pos_water) == 'water':
+                        return True
+        return False
+
+    def place_ores_in_chunk(self, seed):
+        ore_types_info = { # Define ore types, their rarity, depth, and host block
+            'gold': {'texture': gold_texture, 'chance': 0.02, 'min_y': -25, 'max_y': 10, 'host': ['stone']},
+            'emerald': {'texture': emerald_texture, 'chance': 0.015, 'min_y': -30, 'max_y': 5, 'host': ['stone']},
+            'ruby': {'texture': ruby_texture, 'chance': 0.018, 'min_y': -28, 'max_y': 8, 'host': ['stone']}
+            # Add more ores: 'coal', 'iron', 'diamond' with different params
+        }
+        ore_noise_freq = 0.08 # Frequency for ore vein noise
+
+        # Iterate through stone blocks primarily for ore placement
+        # Make a copy of block positions to iterate, as we might modify self.blocks
+        block_positions_in_chunk = list(self.blocks.keys())
+
+        for b_pos_ore in block_positions_in_chunk:
+            bx_ore, by_ore, bz_ore = b_pos_ore
+            current_block_for_ore = self.blocks.get(b_pos_ore)
+
+            for ore_name, ore_data in ore_types_info.items():
+                if current_block_for_ore in ore_data['host']: # Check if current block can host this ore
+                    if ore_data['min_y'] <= by_ore <= ore_data['max_y']: # Check depth
+                        # Use 3D Perlin noise to create ore veins/patches
+                        ore_vein_noise = pnoise3(bx_ore * ore_noise_freq, 
+                                                 by_ore * ore_noise_freq, 
+                                                 bz_ore * ore_noise_freq, 
+                                                 octaves=1, base=seed + 50 + hash(ore_name)%100) # Seed per ore
+                        
+                        if ore_vein_noise > (1.0 - ore_data['chance']): # Higher noise value = higher chance
+                            self.blocks[b_pos_ore] = ore_name # Replace block with ore
+                            # Add this ore to texture_mapping if not already (though it should be)
+                            if ore_name not in texture_mapping:
+                                texture_mapping[ore_name] = ore_data['texture']
+                            if ore_name not in collectible_blocks:
+                                collectible_blocks.append(ore_name)
+                            break # Ore placed, no need to check other ore types for this block
+
+
+    def place_trees_in_chunk(self, seed, current_water_level, current_max_height): # Pass relevant levels
+        tree_seed_offset = seed + 200
+        tree_density_noise_freq = 0.06 
+        tree_placement_noise_freq = 0.12
+        
+        # Use global BIOME_NOISE_FREQUENCY for consistency
+        biome_freq_tree = BIOME_NOISE_FREQUENCY
+        
+        min_tree_spacing_sq = 3**2 # Squared distance for faster checks
+
+        placed_tree_locations = [] # Store (wx, wz) of placed trees for spacing
+
+        for x_offset_tree in range(CHUNK_SIZE):
+            for z_offset_tree in range(CHUNK_SIZE):
+                wx_t = self.chunk_pos[0] + x_offset_tree
+                wz_t = self.chunk_pos[1] + z_offset_tree
+
+                # Find the actual surface Y and block type at (wx_t, wz_t)
+                surface_y_tree = -1000 # Default if no ground
+                block_on_surface_tree = None
+                # Scan from a bit above max_height down to world bottom for ground
+                for y_scan_tree in range(current_max_height + 5, -current_max_height // 2 -1, -1):
+                    b_check = self.blocks.get((wx_t, y_scan_tree, wz_t))
+                    if b_check is not None and b_check != 'water': # Found solid ground
+                        surface_y_tree = y_scan_tree
+                        block_on_surface_tree = b_check
+                        break 
+                
+                if block_on_surface_tree is None: continue # No suitable ground
+
+                # --- Biome check for tree suitability ---
+                temp_tree_raw = (pnoise2(wx_t * biome_freq_tree, wz_t * biome_freq_tree, octaves=2, base=seed + 10) + 1) / 2
+                humidity_tree_raw = (pnoise2(wx_t * biome_freq_tree, wz_t * biome_freq_tree, octaves=2, base=seed + 20) + 1) / 2
+                
+                tree_can_grow_here = False
+                tree_type_to_place = 'treetrunkdark' # Default tree type
+                leaves_type_to_place = 'treeleaves'
+                
+                if block_on_surface_tree == 'grass': # Trees mostly on grass
+                    if temp_tree_raw > 0.4 and humidity_tree_raw > 0.55: # Forest-like conditions
+                        tree_can_grow_here = True
+                        # Could vary tree_type_to_place here based on more specific biome checks
+                    elif 0.25 <= temp_tree_raw <= 0.75 and 0.25 <= humidity_tree_raw <= 0.7: # Plains
+                        if random.random() < 0.15: # Lower chance for trees in plains
+                             tree_can_grow_here = True
+                elif block_on_surface_tree == 'sand' and temp_tree_raw > 0.6 and humidity_tree_raw < 0.35: # Oasis in desert?
+                    if random.random() < 0.05: # Very rare palm-like trees on sand
+                        tree_can_grow_here = True
+                        # tree_type_to_place = 'palmtrunk' # If palm tree assets existed
+                        # leaves_type_to_place = 'palmleaves'
+
+                if not tree_can_grow_here or surface_y_tree <= current_water_level: # No trees underwater
+                    continue
+
+                # Check spacing from other trees
+                too_close_to_other_tree = False
+                for prev_tx, prev_tz in placed_tree_locations:
+                    if (wx_t - prev_tx)**2 + (wz_t - prev_tz)**2 < min_tree_spacing_sq:
+                        too_close_to_other_tree = True; break
+                if too_close_to_other_tree: continue
+
+                # Check for clear space above for tree height (e.g., 5-7 blocks)
+                required_clear_height = 6
+                clear_space_for_tree = True
+                for y_clear_offset in range(1, required_clear_height + 1):
+                    if self.blocks.get((wx_t, surface_y_tree + y_clear_offset, wz_t)) is not None:
+                        clear_space_for_tree = False; break
+                if not clear_space_for_tree: continue
+
+                # Use Perlin noise for final tree placement chance
+                tree_placement_noise_val = (pnoise2(wx_t * tree_placement_noise_freq, wz_t * tree_placement_noise_freq, octaves=1, base=tree_seed_offset) +1)/2
+                
+                # Modulate placement chance by a biome-density factor (e.g. from tree_density_noise)
+                density_mod_noise = (pnoise2(wx_t * tree_density_noise_freq, wz_t * tree_density_noise_freq, octaves=1, base=tree_seed_offset+5) +1)/2
+                final_tree_chance = tree_placement_noise_val * (density_mod_noise * 0.5 + 0.5) # Bias towards denser areas
+
+                if final_tree_chance > 0.65: # Adjust threshold for overall density
+                    actual_trunk_height = random.randint(4, 7)
+                    
+                    # Place trunk blocks
+                    for y_trunk_offset in range(1, actual_trunk_height + 1):
+                        self.blocks[(wx_t, surface_y_tree + y_trunk_offset, wz_t)] = tree_type_to_place
+                    
+                    # Place leaves (example: simple spherical or conical canopy)
+                    canopy_base_y = surface_y_tree + actual_trunk_height
+                    canopy_radius = random.randint(2,3) # Radius of leaves from trunk top
+                    for ly_offset in range(canopy_radius +1): # Iterate vertically for canopy height
+                        for lx_offset in range(-canopy_radius, canopy_radius + 1):
+                            for lz_offset in range(-canopy_radius, canopy_radius + 1):
+                                # Simple sphere-like canopy shape
+                                if lx_offset**2 + lz_offset**2 + (ly_offset - canopy_radius/2)**2 <= canopy_radius**2:
+                                    # Ensure leaves don't replace trunk top, and are above trunk base
+                                    if not (lx_offset == 0 and lz_offset == 0 and ly_offset == 0):
+                                        # Check if block is already occupied (e.g. by another part of this tree's leaves)
+                                        if self.blocks.get((wx_t + lx_offset, canopy_base_y + ly_offset, wz_t + lz_offset)) is None:
+                                             self.blocks[(wx_t + lx_offset, canopy_base_y + ly_offset, wz_t + lz_offset)] = leaves_type_to_place
+                    
+                    # Ensure top of trunk has leaves directly above it
+                    self.blocks[(wx_t, canopy_base_y +1, wz_t)] = leaves_type_to_place 
+                    placed_tree_locations.append((wx_t, wz_t))
+
+    def remove(self):
+        # Destroy Ursina entities associated with this chunk
+        destroy(self.opaque_terrain_entity)
+        destroy(self.water_entity)
+        self.blocks.clear() # Clear block data
+
+    def build_mesh(self):
+        # Combined geometry lists for opaque terrain
+        combined_vertices = []
+        combined_uvs = []
+        combined_normals = []
+        combined_triangles = []
+        combined_colors = [] # Added colors, assuming white for now
+        opaque_idx_offset = 0
+
+        # Water mesh data (as before)
+        water_vertices = []
+        water_uvs = []
+        water_normals = []
+        water_triangles = []
+        water_colors = [] # Assuming consistent color for water, or handle per-vertex if needed
+        water_idx_offset = 0
+
+        # --- Texture Atlas Setup ---
+        # Create an ordered list of unique textures from texture_mapping
+        unique_textures = []
+        texture_to_id = {}
+        # Sort items for consistent ID assignment
+        sorted_texture_mapping_items = sorted(texture_mapping.items(), key=lambda item: item[0])
+
+        for tex_name, tex_obj in sorted_texture_mapping_items:
+            if tex_obj and isinstance(tex_obj, Texture): # Ensure it's an actual texture object
+                if tex_obj not in texture_to_id:
+                    texture_to_id[tex_obj] = len(unique_textures)
+                    unique_textures.append(tex_obj)
+        
+        NUM_TEXTURES_TOTAL = len(unique_textures)
+        ATLAS_GRID_WIDTH = 16 # Example: 16 textures wide
+        if NUM_TEXTURES_TOTAL == 0: # Avoid division by zero if no textures
+            ATLAS_GRID_HEIGHT = 1 
         else:
-            self.dirt_entity.model = None
-            self.dirt_entity.collider = None
-        gm = make_mesh(submesh_data['grass'])
-        if gm:
-            self.grass_entity.model = gm
-            self.grass_entity.collider = 'mesh'
-            self.grass_entity.shader = block_lighting_shader
-            self.grass_entity.double_sided = True
-            self.grass_entity.static = True
+            ATLAS_GRID_HEIGHT = ceil(NUM_TEXTURES_TOTAL / ATLAS_GRID_WIDTH)
+        
+        uv_scale_x = 1.0 / ATLAS_GRID_WIDTH
+        uv_scale_y = 1.0 / ATLAS_GRID_HEIGHT
+        # --- End Texture Atlas Setup ---
+
+        for bpos, bdata_mesh in self.blocks.items():
+            actual_type_mesh = bdata_mesh if not isinstance(bdata_mesh, dict) else bdata_mesh.get("type", bdata_mesh)
+
+            if actual_type_mesh in (DOOR, POKEBALL, FOXFOX, PARTICLE_BLOCK): 
+                continue # Skip special entities for combined meshes
+            
+            is_water_block = (actual_type_mesh == 'water')
+            
+            bx_mesh, by_mesh, bz_mesh = bpos
+            for face_name_mesh, face_verts_mesh in CUBE_FACES.items():
+                nx_mesh = bx_mesh + FACE_NORMALS[face_name_mesh].x
+                ny_mesh = by_mesh + FACE_NORMALS[face_name_mesh].y
+                nz_mesh = bz_mesh + FACE_NORMALS[face_name_mesh].z
+                
+                neighbor_block_data_mesh = self.world.get_block((nx_mesh, ny_mesh, nz_mesh))
+                neighbor_type_mesh = neighbor_block_data_mesh if not isinstance(neighbor_block_data_mesh, dict) \
+                                   else neighbor_block_data_mesh.get("type", neighbor_block_data_mesh)
+
+                should_draw_face_mesh = False
+                if is_water_block:
+                    should_draw_face_mesh = (neighbor_type_mesh is None) or (neighbor_type_mesh != 'water')
+                else: # Opaque blocks
+                    should_draw_face_mesh = (neighbor_type_mesh is None) or \
+                                            (neighbor_type_mesh == 'water') # Draw if neighbor is air or water
+                                            # More complex culling (e.g. different opaque types) could be added here if needed
+
+                if not should_draw_face_mesh:
+                    continue
+
+                # Select the correct lists and offset based on block type
+                if is_water_block:
+                    current_verts_list = water_vertices
+                    current_uvs_list = water_uvs
+                    current_norms_list = water_normals
+                    current_tris_list = water_triangles
+                    current_colors_list = water_colors
+                    base_idx_mesh = water_idx_offset
+                else: # Opaque block
+                    current_verts_list = combined_vertices
+                    current_uvs_list = combined_uvs
+                    current_norms_list = combined_normals
+                    current_tris_list = combined_triangles
+                    current_colors_list = combined_colors
+                    base_idx_mesh = opaque_idx_offset
+
+                # Get texture ID for UV calculation (only for opaque blocks)
+                texture_id_for_uv = -1
+                if not is_water_block:
+                    actual_texture_obj = texture_mapping.get(actual_type_mesh)
+                    if actual_texture_obj and actual_texture_obj in texture_to_id:
+                        texture_id_for_uv = texture_to_id[actual_texture_obj]
+                    else:
+                        # print(f"[WARN] Texture for '{actual_type_mesh}' not in atlas map. Skipping face.")
+                        continue # Skip this face if texture not found/mapped for atlas
+
+                uv_offset_x = 0
+                uv_offset_y = 0
+                if not is_water_block and texture_id_for_uv != -1:
+                    texture_column = texture_id_for_uv % ATLAS_GRID_WIDTH
+                    texture_row = texture_id_for_uv // ATLAS_GRID_WIDTH
+                    uv_offset_x = texture_column * uv_scale_x
+                    # Adjust for Ursina's UV origin (typically top-left for textures, but Mesh UVs are bottom-left)
+                    # If atlas rows are from top (0) to bottom (GRID_HEIGHT-1):
+                    uv_offset_y = (ATLAS_GRID_HEIGHT - 1 - texture_row) * uv_scale_y 
+                    # If atlas rows are from bottom (0) to top (GRID_HEIGHT-1) which is more standard for UV atlases:
+                    # uv_offset_y = texture_row * uv_scale_y
+
+
+                for i_vert, v_local_mesh in enumerate(face_verts_mesh):
+                    vx_m, vy_m, vz_m = bx_mesh + v_local_mesh[0], by_mesh + v_local_mesh[1], bz_mesh + v_local_mesh[2]
+                    current_verts_list.append((vx_m, vy_m, vz_m))
+                    current_norms_list.append(FACE_NORMALS[face_name_mesh])
+                    current_colors_list.append(color.white) # Default to white, can be changed
+
+                    if is_water_block:
+                        # Standard UVs for water (assumes water_texture is not part of the atlas)
+                        current_uvs_list.append((i_vert in (1, 2), i_vert >= 2)) 
+                    elif texture_id_for_uv != -1 : # Opaque block with valid texture ID
+                        # Original face UVs (quad: (0,0), (1,0), (1,1), (0,1) -> map to i_vert)
+                        # Standard UV mapping for a quad:
+                        # Vertex 0: (0,0)
+                        # Vertex 1: (1,0)
+                        # Vertex 2: (1,1)
+                        # Vertex 3: (0,1)
+                        original_face_uv_x = 1.0 if i_vert == 1 or i_vert == 2 else 0.0
+                        original_face_uv_y = 1.0 if i_vert == 2 or i_vert == 3 else 0.0
+                        
+                        # Apply scale and offset for atlas
+                        final_uv_x = original_face_uv_x * uv_scale_x + uv_offset_x
+                        final_uv_y = original_face_uv_y * uv_scale_y + uv_offset_y
+                        current_uvs_list.append((final_uv_x, final_uv_y))
+                    else: # Should not happen if skipped above, but as fallback:
+                        current_uvs_list.append((0,0)) # Fallback UV
+
+                current_tris_list.extend([(base_idx_mesh + 0, base_idx_mesh + 1, base_idx_mesh + 2), 
+                                          (base_idx_mesh + 2, base_idx_mesh + 3, base_idx_mesh + 0)])
+                
+                if is_water_block:
+                    water_idx_offset += 4
+                else:
+                    opaque_idx_offset += 4
+        
+        # --- Finalize Opaque Terrain Mesh ---
+        if combined_vertices:
+            self.opaque_terrain_entity.model = Mesh(vertices=combined_vertices, uvs=combined_uvs,
+                                                    normals=combined_normals, triangles=combined_triangles,
+                                                    colors=combined_colors, mode='triangle', static=True)
+            self.opaque_terrain_entity.collider = 'mesh' # Enable collider
+            self.opaque_terrain_entity.visible = True
         else:
-            self.grass_entity.model = None
-            self.grass_entity.collider = None
-        stm = make_mesh(submesh_data['stone'])
-        if stm:
-            self.stone_entity.model = stm
-            self.stone_entity.collider = 'mesh'
-            self.stone_entity.shader = block_lighting_shader
-            self.stone_entity.double_sided = True
-            self.stone_entity.static = True
-            if not stone_texture:
-                self.stone_entity.color = color.gray
-        else:
-            self.stone_entity.model = None
-            self.stone_entity.collider = None
-        water_data = self.debug_water_mesh_creation()
-        if water_data['verts']:
-            wm = Mesh(vertices=water_data['verts'],
-                      uvs=water_data['uvs'],
-                      normals=water_data['norms'],
-                      triangles=water_data['tris'],
-                      mode='triangle',
-                      static=True)
-            self.water_entity.model = wm
+            self.opaque_terrain_entity.model = None
+            self.opaque_terrain_entity.collider = None 
+            self.opaque_terrain_entity.visible = False
+
+        # --- Finalize Water Mesh ---
+        if water_vertices:
+            self.water_entity.model = Mesh(vertices=water_vertices, uvs=water_uvs,
+                                           normals=water_normals, triangles=water_triangles,
+                                           colors=water_colors, mode='triangle', static=True)
             self.water_entity.visible = True
-            self.water_entity.double_sided = True
-            self.water_entity.static = True
         else:
-            self.water_entity.visible = False
             self.water_entity.model = None
-        sm = make_mesh(submesh_data['sponge'])
-        if sm:
-            self.sponge_entity.model = sm
-            self.sponge_entity.collider = 'mesh'
-            self.sponge_entity.shader = block_lighting_shader
-            self.sponge_entity.double_sided = True
-            self.sponge_entity.static = True
-            if not sponge_texture:
-                self.sponge_entity.color = color.yellow
-        else:
-            self.sponge_entity.model = None
-            self.sponge_entity.collider = None
-        ctm = make_mesh(submesh_data['crackedtile'])
-        if ctm:
-            self.crackedtile_entity.model = ctm
-            self.crackedtile_entity.collider = 'mesh'
-            self.crackedtile_entity.shader = block_lighting_shader
-            self.crackedtile_entity.double_sided = True
-            self.crackedtile_entity.static = True
-            if not crackedtile_texture:
-                self.crackedtile_entity.color = color.rgb(100,100,100)
-        else:
-            self.crackedtile_entity.model = None
-            self.crackedtile_entity.collider = None
-        dsm = make_mesh(submesh_data['darkshingle'])
-        if dsm:
-            self.darkshingle_entity.model = dsm
-            self.darkshingle_entity.collider = 'mesh'
-            self.darkshingle_entity.shader = block_lighting_shader
-            self.darkshingle_entity.double_sided = True
-            self.darkshingle_entity.static = True
-            if not darkshingle_texture:
-                self.darkshingle_entity.color = color.rgb(40,40,40)
-        else:
-            self.darkshingle_entity.model = None
-            self.darkshingle_entity.collider = None
-        dwm = make_mesh(submesh_data['darkwood'])
-        if dwm:
-            self.darkwood_entity.model = dwm
-            self.darkwood_entity.collider = 'mesh'
-            self.darkwood_entity.shader = block_lighting_shader
-            self.darkwood_entity.double_sided = True
-            self.darkwood_entity.static = True
-            if not darkwood_texture:
-                self.darkwood_entity.color = color.brown
-        else:
-            self.darkwood_entity.model = None
-            self.darkwood_entity.collider = None
-        lwm = make_mesh(submesh_data['lightwood'])
-        if lwm:
-            self.lightwood_entity.model = lwm
-            self.lightwood_entity.collider = 'mesh'
-            self.lightwood_entity.shader = block_lighting_shader
-            self.lightwood_entity.double_sided = True
-            self.lightwood_entity.static = True
-            if not lightwood_texture:
-                self.lightwood_entity.color = color.rgb(200,180,130)
-        else:
-            self.lightwood_entity.model = None
-            self.lightwood_entity.collider = None
-        ttdm = make_mesh(submesh_data['treetrunkdark'])
-        if ttdm:
-            self.treetrunkdark_entity.model = ttdm
-            self.treetrunkdark_entity.collider = 'mesh'
-            self.treetrunkdark_entity.shader = block_lighting_shader
-            self.treetrunkdark_entity.double_sided = True
-            self.treetrunkdark_entity.static = True
-            if not treetrunkdark_texture:
-                self.treetrunkdark_entity.color = color.rgb(60,35,20)
-        else:
-            self.treetrunkdark_entity.model = None
-            self.treetrunkdark_entity.collider = None
-        ttltm = make_mesh(submesh_data['treetrunklight'])
-        if ttltm:
-            self.treetrunklight_entity.model = ttltm
-            self.treetrunklight_entity.collider = 'mesh'
-            self.treetrunklight_entity.shader = block_lighting_shader
-            self.treetrunklight_entity.double_sided = True
-            self.treetrunklight_entity.static = True
-            if not treetrunklight_texture:
-                self.treetrunklight_entity.color = color.rgb(140,120,100)
-        else:
-            self.treetrunklight_entity.model = None
-            self.treetrunklight_entity.collider = None
-        tlm = make_mesh(submesh_data['treeleaves'])
-        if tlm:
-            self.treeleaves_entity.model = tlm
-            self.treeleaves_entity.collider = 'mesh'
-            self.treeleaves_entity.shader = block_lighting_shader
-            self.treeleaves_entity.double_sided = True
-            self.treeleaves_entity.static = True
-            if not treeleaves_texture:
-                self.treeleaves_entity.color = color.green
-        else:
-            self.treeleaves_entity.model = None
-            self.treeleaves_entity.collider = None
-        cgm = make_mesh(submesh_data['crackedglyphs'])
-        if cgm:
-            self.crackedglyphs_entity.model = cgm
-            self.crackedglyphs_entity.collider = 'mesh'
-            self.crackedglyphs_entity.shader = block_lighting_shader
-            self.crackedglyphs_entity.double_sided = True
-            self.crackedglyphs_entity.static = True
-        else:
-            self.crackedglyphs_entity.model = None
-            self.crackedglyphs_entity.collider = None
-        em = make_mesh(submesh_data['emerald'])
-        if em:
-            self.emerald_entity.model = em
-            self.emerald_entity.collider = 'mesh'
-            self.emerald_entity.shader = block_lighting_shader
-            self.emerald_entity.double_sided = True
-            self.emerald_entity.static = True
-        else:
-            self.emerald_entity.model = None
-            self.emerald_entity.collider = None
-        gm_new = make_mesh(submesh_data['gold'])
-        if gm_new:
-            self.gold_entity.model = gm_new
-            self.gold_entity.collider = 'mesh'
-            self.gold_entity.shader = block_lighting_shader
-            self.gold_entity.double_sided = True
-            self.gold_entity.static = True
-        else:
-            self.gold_entity.model = None
-            self.gold_entity.collider = None
-        rb = make_mesh(submesh_data['redbrick'])
-        if rb:
-            self.redbrick_entity.model = rb
-            self.redbrick_entity.collider = 'mesh'
-            self.redbrick_entity.shader = block_lighting_shader
-            self.redbrick_entity.double_sided = True
-            self.redbrick_entity.static = True
-        else:
-            self.redbrick_entity.model = None
-            self.redbrick_entity.collider = None
-        rc = make_mesh(submesh_data['redcement'])
-        if rc:
-            self.redcement_entity.model = rc
-            self.redcement_entity.collider = 'mesh'
-            self.redcement_entity.shader = block_lighting_shader
-            self.redcement_entity.double_sided = True
-            self.redcement_entity.static = True
-        else:
-            self.redcement_entity.model = None
-            self.redcement_entity.collider = None
-        ru = make_mesh(submesh_data['ruby'])
-        if ru:
-            self.ruby_entity.model = ru
-            self.ruby_entity.collider = 'mesh'
-            self.ruby_entity.shader = block_lighting_shader
-            self.ruby_entity.double_sided = True
-            self.ruby_entity.static = True
-        else:
-            self.ruby_entity.model = None
-            self.ruby_entity.collider = None
-        sn = make_mesh(submesh_data['sand'])
-        if sn:
-            self.sand_entity.model = sn
-            self.sand_entity.collider = 'mesh'
-            self.sand_entity.shader = block_lighting_shader
-            self.sand_entity.double_sided = True
-            self.sand_entity.static = True
-        else:
-            self.sand_entity.model = None
-            self.sand_entity.collider = None
-        ss = make_mesh(submesh_data['seashells'])
-        if ss:
-            self.seashells_entity.model = ss
-            self.seashells_entity.collider = 'mesh'
-            self.seashells_entity.shader = block_lighting_shader
-            self.seashells_entity.double_sided = True
-            self.seashells_entity.static = True
-        else:
-            self.seashells_entity.model = None
-            self.seashells_entity.collider = None
-        st = make_mesh(submesh_data['steel'])
-        if st:
-            self.steel_entity.model = st
-            self.steel_entity.collider = 'mesh'
-            self.steel_entity.shader = block_lighting_shader
-            self.steel_entity.double_sided = True
-            self.steel_entity.static = True
-        else:
-            self.steel_entity.model = None
-            self.steel_entity.collider = None
-        sw = make_mesh(submesh_data['stripedwatercolor'])
-        if sw:
-            self.stripedwatercolor_entity.model = sw
-            self.stripedwatercolor_entity.collider = 'mesh'
-            self.stripedwatercolor_entity.shader = block_lighting_shader
-            self.stripedwatercolor_entity.double_sided = True
-            self.stripedwatercolor_entity.static = True
-        else:
-            self.stripedwatercolor_entity.model = None
-            self.stripedwatercolor_entity.collider = None
-        yw = make_mesh(submesh_data['yellowwool'])
-        if yw:
-            self.yellowwool_entity.model = yw
-            self.yellowwool_entity.collider = 'mesh'
-            self.yellowwool_entity.shader = block_lighting_shader
-            self.yellowwool_entity.double_sided = True
-            self.yellowwool_entity.static = True
-        else:
-            self.yellowwool_entity.model = None
-            self.yellowwool_entity.collider = None
-        bfil = make_mesh(submesh_data['blackfiligree'])
-        if bfil:
-            self.blackfiligree_entity.model = bfil
-            self.blackfiligree_entity.collider = 'mesh'
-            self.blackfiligree_entity.shader = block_lighting_shader
-            self.blackfiligree_entity.double_sided = True
-            self.blackfiligree_entity.static = True
-        else:
-            self.blackfiligree_entity.model = None
-            self.blackfiligree_entity.collider = None
-        bw = make_mesh(submesh_data['bluewool'])
-        if bw:
-            self.bluewool_entity.model = bw
-            self.bluewool_entity.collider = 'mesh'
-            self.bluewool_entity.shader = block_lighting_shader
-            self.bluewool_entity.double_sided = True
-            self.bluewool_entity.static = True
-        else:
-            self.bluewool_entity.model = None
-            self.bluewool_entity.collider = None
-        gw = make_mesh(submesh_data['greenwool'])
-        if gw:
-            self.greenwool_entity.model = gw
-            self.greenwool_entity.collider = 'mesh'
-            self.greenwool_entity.shader = block_lighting_shader
-            self.greenwool_entity.double_sided = True
-            self.greenwool_entity.static = True
-        else:
-            self.greenwool_entity.model = None
-            self.greenwool_entity.collider = None
-        pw = make_mesh(submesh_data['purplewool'])
-        if pw:
-            self.purplewool_entity.model = pw
-            self.purplewool_entity.collider = 'mesh'
-            self.purplewool_entity.shader = block_lighting_shader
-            self.purplewool_entity.double_sided = True
-            self.purplewool_entity.static = True
-        else:
-            self.purplewool_entity.model = None
-            self.purplewool_entity.collider = None
-        rw = make_mesh(submesh_data['redwool'])
-        if rw:
-            self.redwool_entity.model = rw
-            self.redwool_entity.collider = 'mesh'
-            self.redwool_entity.shader = block_lighting_shader
-            self.redwool_entity.double_sided = True
-            self.redwool_entity.static = True
-        else:
-            self.redwool_entity.model = None
-            self.redwool_entity.collider = None
-    def set_block(self, pos, btype):
-        if btype is None:
+            self.water_entity.visible = False
+            
+    def set_block(self, pos, btype): # pos is world coordinates
+        # Update own block dictionary
+        if btype is None: # Removing block
             if pos in self.blocks:
                 del self.blocks[pos]
-        else:
+        else: # Placing or changing block
             self.blocks[pos] = btype
-        self.build_mesh()
+        
+        self.build_mesh() # Rebuild this chunk's mesh first
 
-class VoxelWorld:
+        # Determine if the modified block is on a boundary and rebuild neighbors if so
+        # Relative position of the block within this chunk
+        block_x_rel_to_chunk = pos[0] - self.chunk_pos[0]
+        block_z_rel_to_chunk = pos[2] - self.chunk_pos[1]
+
+        # Check X boundaries
+        if block_x_rel_to_chunk == 0:
+            self.world.rebuild_chunk_at((self.chunk_pos[0] - CHUNK_SIZE, self.chunk_pos[1]))
+        elif block_x_rel_to_chunk == CHUNK_SIZE - 1:
+            self.world.rebuild_chunk_at((self.chunk_pos[0] + CHUNK_SIZE, self.chunk_pos[1]))
+        # Check Z boundaries
+        if block_z_rel_to_chunk == 0:
+            self.world.rebuild_chunk_at((self.chunk_pos[0], self.chunk_pos[1] - CHUNK_SIZE))
+        elif block_z_rel_to_chunk == CHUNK_SIZE - 1:
+            self.world.rebuild_chunk_at((self.chunk_pos[0], self.chunk_pos[1] + CHUNK_SIZE))
+        
+        # Optional: Could also rebuild diagonal neighbors if on a corner, though less critical for visuals.
+
+
+class VoxelWorld: # Container for all Chunks
     def __init__(self):
-        self.chunks = {}
-    def get_block(self, pos):
-        cx = (pos[0]//CHUNK_SIZE)*CHUNK_SIZE
-        cz = (pos[2]//CHUNK_SIZE)*CHUNK_SIZE
-        cpos = (cx,cz)
-        if cpos not in self.chunks:
-            return None
-        return self.chunks[cpos].blocks.get(pos, None)
-    def set_block(self, pos, btype):
-        cx = (pos[0]//CHUNK_SIZE)*CHUNK_SIZE
-        cz = (pos[2]//CHUNK_SIZE)*CHUNK_SIZE
-        cpos = (cx,cz)
-        if cpos not in self.chunks:
-            self.chunks[cpos] = Chunk(self, cpos, generate_terrain=False)
-        chunk = self.chunks[cpos]
-        chunk.set_block(pos, btype)
-        x_in = pos[0]-cx
-        z_in = pos[2]-cz
-        neighbors = []
-        if x_in==0:
-            neighbors.append((cx-CHUNK_SIZE,cz))
-        if x_in==CHUNK_SIZE-1:
-            neighbors.append((cx+CHUNK_SIZE,cz))
-        if z_in==0:
-            neighbors.append((cx,cz-CHUNK_SIZE))
-        if z_in==CHUNK_SIZE-1:
-            neighbors.append((cx,cz+CHUNK_SIZE))
-        for np in neighbors:
-            if np in self.chunks:
-                self.chunks[np].build_mesh()
+        self.chunks = {} # (cx, cz) -> Chunk instance
 
-class World:
-    def __init__(self, filename=None, force_new=False, streaming_mode=False):
-        self.streaming_mode = streaming_mode
-        self.vworld = VoxelWorld()
-        self.chunks = self.vworld.chunks
-        if not streaming_mode:
+    def get_block(self, world_pos): # world_pos is (x,y,z)
+        px, py, pz = floor(world_pos[0]), floor(world_pos[1]), floor(world_pos[2])
+        
+        chunk_coord_x = (px // CHUNK_SIZE) * CHUNK_SIZE
+        chunk_coord_z = (pz // CHUNK_SIZE) * CHUNK_SIZE
+        target_chunk_coord = (chunk_coord_x, chunk_coord_z)
+
+        if target_chunk_coord in self.chunks:
+            return self.chunks[target_chunk_coord].blocks.get((px, py, pz), None)
+        return None # Chunk not found
+
+    def set_block(self, world_pos, block_type_set): # world_pos is (x,y,z)
+        px_set, py_set, pz_set = floor(world_pos[0]), floor(world_pos[1]), floor(world_pos[2])
+
+        chunk_coord_x_set = (px_set // CHUNK_SIZE) * CHUNK_SIZE
+        chunk_coord_z_set = (pz_set // CHUNK_SIZE) * CHUNK_SIZE
+        target_chunk_coord_set = (chunk_coord_x_set, chunk_coord_z_set)
+
+        if target_chunk_coord_set not in self.chunks:
+            # This case implies creating a chunk if it doesn't exist.
+            # This might be okay for dynamic worlds, but for pre-generated or streaming,
+            # chunks should ideally be managed by the World class's load/update_chunks.
+            # For now, let's assume if set_block is called, the chunk should exist or be made.
+            # print(f"[VoxelWorld] Auto-creating chunk at {target_chunk_coord_set} due to set_block.")
+            self.chunks[target_chunk_coord_set] = Chunk(self, target_chunk_coord_set, generate_terrain_on_init=False)
+            # generate_terrain=False because we are about to set a specific block, not bulk generate.
+            # If this new chunk needs terrain, it should be handled by a separate call.
+
+        self.chunks[target_chunk_coord_set].set_block((px_set, py_set, pz_set), block_type_set)
+        # The Chunk's set_block method now handles rebuilding itself and its direct neighbors.
+
+    def rebuild_chunk_at(self, chunk_coord_rebuild): # Helper for Chunk to call
+        if chunk_coord_rebuild in self.chunks:
+            self.chunks[chunk_coord_rebuild].build_mesh()
+
+
+class World: # High-level game world manager
+    def __init__(self, filename=None, force_new_world=False, use_streaming_mode=False): # Renamed args
+        self.streaming_mode = use_streaming_mode
+        self.vworld = VoxelWorld() # Underlying voxel data and chunk container
+        self.chunks = self.vworld.chunks # Direct reference for convenience (active chunks)
+        self.saved_chunk_data = {} # Cache for chunk data from save file in streaming mode
+
+        save_folder_path = 'save'
+        if not os.path.exists(save_folder_path):
+            os.makedirs(save_folder_path)
+
+        if self.streaming_mode:
+            self.chunks.clear() # Ensure active chunks start empty for streaming
+            if force_new_world:
+                print("[STREAMING INIT] Force_new_world is true. Starting fresh, not loading save file into cache.")
+                self.saved_chunk_data.clear() # Ensure cache is empty
+                # If a save file exists with the current name, it might be good to remove it here too.
+                # For now, just clearing the cache is sufficient as per prompt.
+                save_file_to_potentially_remove = os.path.join(save_folder_path, filename if filename else current_save_name)
+                if os.path.exists(save_file_to_potentially_remove):
+                    try:
+                        os.remove(save_file_to_potentially_remove)
+                        print(f"[STREAMING INIT] Removed old save file '{save_file_to_potentially_remove}' due to force_new_world.")
+                    except OSError as e:
+                        print(f"[STREAMING INIT] Error removing old save file '{save_file_to_potentially_remove}': {e}")
+            else: # Streaming mode, not forcing new world -> try to load save into cache
+                load_file_path_stream_cache = os.path.join(save_folder_path, filename if filename else current_save_name)
+                print(f"[STREAMING INIT] Attempting to load save file '{load_file_path_stream_cache}' into cache.")
+                try:
+                    with open(load_file_path_stream_cache, 'r') as f_cache:
+                        full_saved_data = json.load(f_cache)
+                        self.saved_chunk_data = full_saved_data.get("chunks", {})
+                        # Load world settings if they exist in the save file (e.g., CHUNK_SIZE)
+                        # This is important so that chunk key generation in update_chunks uses correct CHUNK_SIZE
+                        # if it was different in the loaded world.
+                        saved_settings_cache = full_saved_data.get("world_settings")
+                        if saved_settings_cache:
+                            global CHUNK_SIZE, WORLD_SIZE # Allow updating these from save
+                            CHUNK_SIZE = saved_settings_cache.get("chunk_size", CHUNK_SIZE)
+                            WORLD_SIZE = saved_settings_cache.get("world_radius_chunks", WORLD_SIZE) # Less critical for streaming
+                            print(f"[STREAMING INIT] Loaded settings from save cache: ChunkSize={CHUNK_SIZE}, WorldRadius={WORLD_SIZE}")
+                        print(f"[STREAMING INIT] Loaded {len(self.saved_chunk_data)} chunks into cache from '{load_file_path_stream_cache}'.")
+                except FileNotFoundError:
+                    print(f"[STREAMING INIT] Save file '{load_file_path_stream_cache}' not found. Starting with empty cache.")
+                    self.saved_chunk_data = {}
+                except json.JSONDecodeError as e_json:
+                    print(f"[STREAMING INIT] Error decoding JSON from '{load_file_path_stream_cache}': {e_json}. Starting with empty cache.")
+                    self.saved_chunk_data = {}
+            # Initial chunks around player will be loaded by update_chunks.
+        
+        else: # Not streaming mode
             if filename:
-                if force_new and os.path.exists(os.path.join('save', filename)):
-                    os.remove(os.path.join('save', filename))
-                    print("Forcing new world: removed old save.")
-                    self.generate_chunks()
+                full_file_path_load = os.path.join(save_folder_path, filename)
+                if force_new_world and os.path.exists(full_file_path_load):
+                    os.remove(full_file_path_load)
+                    print(f"Forcing new world: removed old save '{full_file_path_load}'.")
+                    self.generate_all_chunks() # This will populate self.chunks directly
+                elif os.path.exists(full_file_path_load): # File exists, try to load
+                    self.load_world_from_file(filename) # This populates self.chunks
+                else: # File doesn't exist, generate new
+                    print(f"Save file '{full_file_path_load}' not found. Generating new world.")
+                    self.generate_all_chunks()
+            else: # No filename, try default or generate new
+                default_save_name_init = current_save_name # from global
+                if os.path.exists(os.path.join(save_folder_path, default_save_name_init)):
+                    self.load_world_from_file(default_save_name_init)
                 else:
-                    self.load_world(filename)
-            else:
-                self.load_world()
-        else:
-            self.chunks = {}
-    def generate_chunks(self):
-        print(f"Generating new world. CHUNK_SIZE={CHUNK_SIZE}, WORLD_SIZE={WORLD_SIZE}.")
-        self.chunks.clear()
-        for x in range(-WORLD_SIZE, WORLD_SIZE):
-            for z in range(-WORLD_SIZE, WORLD_SIZE):
-                cpos = (x*CHUNK_SIZE, z*CHUNK_SIZE)
-                c = Chunk(self.vworld, cpos, generate_terrain=True)
-                self.chunks[cpos] = c
-        for c in self.chunks.values():
-            c.build_mesh()
-        print("Finished generating new world.")
-    def update_chunks(self, player_position):
-        if not self.streaming_mode:
-            return
-        cx = (int(player_position.x)//CHUNK_SIZE)*CHUNK_SIZE
-        cz = (int(player_position.z)//CHUNK_SIZE)*CHUNK_SIZE
-        load_radius = 8
-        desired = set()
-        for dx in range(-load_radius, load_radius+1):
-            for dz in range(-load_radius, load_radius+1):
-                desired.add((cx+dx*CHUNK_SIZE, cz+dz*CHUNK_SIZE))
-        for cpos in list(self.chunks.keys()):
-            if cpos not in desired:
-                self.chunks[cpos].remove()
-                del self.chunks[cpos]
-        for cpos in desired:
-            if cpos not in self.chunks:
-                self.chunks[cpos] = Chunk(self.vworld, cpos, generate_terrain=True)
-                self.chunks[cpos].build_mesh()
-    def save_world(self):
-        global current_save_name
-        file_path = os.path.join('save', current_save_name)
-        print(f"Saving world to {file_path}...")
-        data = {}
-        for cpos, chunk in self.chunks.items():
-            ckey = f"{cpos[0]},{cpos[1]}"
-            data[ckey] = {}
-            for bpos, bdata in chunk.blocks.items():
-                bx,by,bz = bpos
-                data[ckey][f"{bx},{by},{bz}"] = bdata
-        with open(file_path, 'w') as f:
-            json.dump(data, f, indent=4)
-        print("World saved.")
-    def load_world(self, filename=None):
-        if filename is None:
-            filename = current_save_name
-        file_path = os.path.join('save', filename)
-        if not os.path.exists(file_path):
-            print(f"No '{file_path}' found. Generating new world...")
-            self.generate_chunks()
-            return
-        print(f"Found '{file_path}'. Attempting to load.")
-        if self.streaming_mode and ijson is not None:
-            load_limit = 5*CHUNK_SIZE
-            with open(file_path, 'r') as f:
-                parser = ijson.kvitems(f, '')
-                for key, blockdict in parser:
-                    try:
-                        cx,cz = map(int, key.split(','))
-                    except:
-                        continue
-                    if abs(cx) <= load_limit and abs(cz) <= load_limit:
-                        c = Chunk(self.vworld, (cx,cz), generate_terrain=False)
-                        for bk, bdata in blockdict.items():
-                            try:
-                                bx,by,bz = map(int, bk.split(','))
-                                c.blocks[(bx,by,bz)] = bdata
-                            except:
-                                pass
-                        self.chunks[(cx,cz)] = c
-                        c.build_mesh()
-            print("Streaming world loaded (partial).")
-        else:
-            try:
-                with open(file_path, 'r') as f:
-                    data = json.load(f)
-                for ckey, blockdict in data.items():
-                    try:
-                        cx,cz = map(int, ckey.split(','))
-                    except:
-                        continue
-                    c = Chunk(self.vworld, (cx,cz), generate_terrain=False)
-                    for bk, bdata in blockdict.items():
+                    print("No default save found. Generating new world.")
+                    self.generate_all_chunks()
+
+    def generate_all_chunks(self): # For non-streaming mode
+        print(f"Generating new world (non-streaming). CHUNK_SIZE={CHUNK_SIZE}, WORLD_SIZE (radius)={WORLD_SIZE}.")
+        self.vworld.chunks.clear() # Clear any existing chunks in VoxelWorld
+
+        # WORLD_SIZE is radius in chunks from (0,0)
+        for x_chunk_gen_idx in range(-WORLD_SIZE, WORLD_SIZE + 1): # Inclusive range for full size
+            for z_chunk_gen_idx in range(-WORLD_SIZE, WORLD_SIZE + 1):
+                chunk_base_coords = (x_chunk_gen_idx * CHUNK_SIZE, z_chunk_gen_idx * CHUNK_SIZE)
+                new_chunk_instance = Chunk(self.vworld, chunk_base_coords, generate_terrain_on_init=True)
+                self.chunks[chunk_base_coords] = new_chunk_instance
+        
+        for chk_to_build in self.chunks.values():
+            chk_to_build.build_mesh()
+        print("Finished generating new world (non-streaming).")
+
+    def update_chunks(self, player_world_pos): # For streaming mode
+        if not self.streaming_mode: return
+
+        player_chunk_x_base_stream = (floor(player_world_pos.x) // CHUNK_SIZE) * CHUNK_SIZE
+        player_chunk_z_base_stream = (floor(player_world_pos.z) // CHUNK_SIZE) * CHUNK_SIZE
+        
+        # Define view distance in chunks (e.g., 8 chunks radius -> 17x17 area)
+        stream_view_radius_chunks = 8 
+        
+        currently_desired_chunks = set()
+        for dx_stream_offset in range(-stream_view_radius_chunks, stream_view_radius_chunks + 1):
+            for dz_stream_offset in range(-stream_view_radius_chunks, stream_view_radius_chunks + 1):
+                coord_key_desired = (player_chunk_x_base_stream + dx_stream_offset * CHUNK_SIZE, 
+                                     player_chunk_z_base_stream + dz_stream_offset * CHUNK_SIZE)
+                currently_desired_chunks.add(coord_key_desired)
+
+        # Unload chunks no longer in desired set
+        loaded_chunk_keys = list(self.chunks.keys())
+        for loaded_key in loaded_chunk_keys:
+            if loaded_key not in currently_desired_chunks:
+                self.chunks[loaded_key].remove() # Ursina entity cleanup
+                del self.chunks[loaded_key]
+        
+        # Load new chunks that are desired but not loaded
+        for desired_key in currently_desired_chunks:
+            if desired_key not in self.chunks:
+                new_chunk_instance = None
+                chunk_key_str = f"{desired_key[0]},{desired_key[1]}"
+
+                if chunk_key_str in self.saved_chunk_data:
+                    # Load from cache
+                    # print(f"[STREAMING] Loading chunk {desired_key} from saved_chunk_data cache.")
+                    new_chunk_instance = Chunk(self.vworld, desired_key, generate_terrain_on_init=False)
+                    block_data_for_this_chunk = self.saved_chunk_data[chunk_key_str]
+                    
+                    for bk_str, bdata_val in block_data_for_this_chunk.items():
                         try:
-                            bx,by,bz = map(int, bk.split(','))
-                            c.blocks[(bx,by,bz)] = bdata
-                        except:
-                            pass
-                    self.chunks[(cx,cz)] = c
-                for c in self.chunks.values():
-                    c.build_mesh()
-                print("World loaded successfully.")
-            except Exception as e:
-                print(f"Error loading save: {e}. Generating new world instead.")
-                self.chunks.clear()
-                self.generate_chunks()
-        for chunk in self.chunks.values():
-            for pos, bdata in chunk.blocks.items():
-                actual_type = bdata if not isinstance(bdata, dict) else bdata.get("type", bdata)
-                rot = 0
-                if isinstance(bdata, dict):
-                    rot = bdata.get("rotation", 0)
-                if actual_type == DOOR:
-                    if pos not in door_entities:
-                        door = Door(pos)
-                        door.pivot.rotation_y = rot
-                        door_entities[pos] = door
-                elif actual_type == POKEBALL:
-                    if pos not in pokeball_entities:
-                        pb = PokeballEntity(pos)
-                        pb.rotation_y = rot
-                        pokeball_entities[pos] = pb
-                elif actual_type == FOXFOX:
-                    if pos not in foxfox_entities:
-                        ff = FoxfoxEntity(pos)
-                        ff.rotation_y = rot
-                        foxfox_entities[pos] = ff
-                elif actual_type == PARTICLE_BLOCK:
-                    if pos not in particleblock_entities:
-                        pb = ParticleBlockEntity(pos)
-                        particleblock_entities[pos] = pb
-    def set_block(self, pos, btype):
-        self.vworld.set_block(pos, btype)
-    def get_block(self, pos):
-        return self.vworld.get_block(pos)
+                            bx, by, bz = map(int, bk_str.split(','))
+                            new_chunk_instance.blocks[(bx, by, bz)] = bdata_val
+                        except ValueError:
+                            # print(f"[WARN] update_chunks: Malformed block key '{bk_str}' in cached chunk {chunk_key_str}")
+                            continue # Skip malformed block key
+                    
+                    # Recreate special entities for this loaded chunk
+                    self._recreate_special_entities_for_chunk(block_data_for_this_chunk)
+                else:
+                    # Generate new chunk if not in cache
+                    # print(f"[STREAMING] Generating new chunk {desired_key} as it's not in cache.")
+                    new_chunk_instance = Chunk(self.vworld, desired_key, generate_terrain_on_init=True)
+                
+                if new_chunk_instance:
+                    self.chunks[desired_key] = new_chunk_instance
+                    new_chunk_instance.build_mesh() # Build mesh for the new/loaded chunk
+
+    def _recreate_special_entities_for_chunk(self, chunk_block_data_dict):
+        # Helper to recreate special entities for a chunk based on its block data.
+        # chunk_block_data_dict is the dict of blocks for this specific chunk,
+        # e.g., self.saved_chunk_data[chunk_key_string]
+        if not chunk_block_data_dict:
+            return
+
+        for block_pos_str, block_data_val in chunk_block_data_dict.items():
+            try:
+                # Block positions are world coordinates, already stored as such in save file
+                bx, by, bz = map(int, block_pos_str.split(','))
+                pos_tuple = (bx, by, bz)
+            except ValueError:
+                # print(f"[WARN] _recreate_special_entities: Malformed block position string '{block_pos_str}'")
+                continue
+
+            actual_type = block_data_val
+            rotation = 0
+            if isinstance(block_data_val, dict):
+                actual_type = block_data_val.get("type", block_data_val)
+                rotation = block_data_val.get("rotation", 0)
+            
+            # Ensure global entity dicts are used and entities are not duplicated
+            if actual_type == DOOR:
+                if pos_tuple not in door_entities:
+                    # Check if this is the "bottom" part of a door if that data is stored
+                    # For simplicity, assume any DOOR entry from save needs an entity if not present
+                    door_obj = Door(pos_tuple)
+                    door_obj.pivot.rotation_y = rotation
+                    # Check if door is open based on rotation, or add 'open_state' to save data if needed
+                    if abs(rotation - door_obj.open_rotation) < 1: # Simple check
+                        door_obj.open = True
+                        door_obj.collider = None
+                    else:
+                        door_obj.open = False
+                    door_entities[pos_tuple] = door_obj
+            elif actual_type == POKEBALL:
+                if pos_tuple not in pokeball_entities:
+                    pb_obj = PokeballEntity(pos_tuple)
+                    pb_obj.rotation_y = rotation # Pokeballs might also have a saved rotation
+                    pokeball_entities[pos_tuple] = pb_obj
+            elif actual_type == FOXFOX:
+                if pos_tuple not in foxfox_entities:
+                    ff_obj = FoxfoxEntity(pos_tuple)
+                    ff_obj.rotation_y = rotation # Foxfox entities might also have a saved rotation
+                    foxfox_entities[pos_tuple] = ff_obj
+            # PARTICLE_BLOCK is a terrain block type, not usually a separate global entity unless
+            # it manages an effect. If ParticleBlockEntity instances are needed globally:
+            # elif actual_type == PARTICLE_BLOCK:
+            #     if pos_tuple not in particleblock_entities:
+            #         # particleblock_entities[pos_tuple] = ParticleBlockEntity(pos_tuple)
+            #         pass # Assuming ParticleBlockEntity is for effects, may not need recreation this way.
+
+    def save_world(self): # Saves current world state to JSON
+        global current_save_name # Uses the global save name
+        save_file_path_actual = os.path.join('save', current_save_name)
+        
+        print(f"Saving world to '{save_file_path_actual}'...")
+        data_to_save_json = {}
+        # Include world settings like CHUNK_SIZE, WORLD_SIZE for potential future use on load
+        data_to_save_json["world_settings"] = {
+            "chunk_size": CHUNK_SIZE,
+            "world_radius_chunks": WORLD_SIZE # Note: This is radius if non-streaming
+        }
+        data_to_save_json["chunks"] = {}
+
+        for chunk_coord_key_save, chunk_inst_save in self.chunks.items():
+            json_key_for_chunk = f"{chunk_coord_key_save[0]},{chunk_coord_key_save[1]}"
+            data_to_save_json["chunks"][json_key_for_chunk] = {} # Init dict for this chunk's blocks
+            
+            for block_pos_key_save, block_data_val_save in chunk_inst_save.blocks.items():
+                json_key_for_block = f"{block_pos_key_save[0]},{block_pos_key_save[1]},{block_pos_key_save[2]}"
+                data_to_save_json["chunks"][json_key_for_chunk][json_key_for_block] = block_data_val_save
+        
+        try:
+            with open(save_file_path_actual, 'w') as f_save:
+                json.dump(data_to_save_json, f_save, indent=2) # Use indent for readability
+            print("World saved successfully.")
+        except Exception as e_save:
+            print(f"Error saving world to '{save_file_path_actual}': {e_save}")
+
+    def load_world_from_file(self, save_filename_to_load): # Loads world from JSON
+        global CHUNK_SIZE, WORLD_SIZE # Allow updating these from save if present
+        
+        # This method is primarily for non-streaming mode full loads.
+        # In streaming mode, __init__ handles populating self.saved_chunk_data.
+        # If this method IS called in streaming mode (e.g. by a command),
+        # it should ideally clear active chunks and then let update_chunks repopulate from the new cache.
+        # For now, the main __init__ logic handles the streaming mode startup.
+        
+        # The following logic is for NON-STREAMING mode.
+        if self.streaming_mode:
+            print(f"[WARNING] load_world_from_file called in streaming mode for '{save_filename_to_load}'. This is unusual.")
+            print("Clearing active chunks and saved_chunk_data cache. World will reload based on new file via update_chunks.")
+            for chunk_inst in self.chunks.values(): # Destroy existing active chunk entities
+                chunk_inst.remove()
+            self.chunks.clear()
+            self.saved_chunk_data.clear()
+            
+            # Populate self.saved_chunk_data from the new file.
+            load_file_path_stream_reload = os.path.join('save', save_filename_to_load)
+            try:
+                with open(load_file_path_stream_reload, 'r') as f_reload_cache:
+                    full_saved_data_reload = json.load(f_reload_cache)
+                    self.saved_chunk_data = full_saved_data_reload.get("chunks", {})
+                    saved_settings_reload = full_saved_data_reload.get("world_settings")
+                    if saved_settings_reload:
+                        global CHUNK_SIZE, WORLD_SIZE
+                        CHUNK_SIZE = saved_settings_reload.get("chunk_size", CHUNK_SIZE)
+                        WORLD_SIZE = saved_settings_reload.get("world_radius_chunks", WORLD_SIZE)
+                        print(f"[STREAMING RELOAD] Loaded settings: ChunkSize={CHUNK_SIZE}")
+                    print(f"[STREAMING RELOAD] Loaded {len(self.saved_chunk_data)} chunks into cache from '{load_file_path_stream_reload}'.")
+            except FileNotFoundError:
+                print(f"[STREAMING RELOAD] File '{load_file_path_stream_reload}' not found. Cache is empty.")
+            except json.JSONDecodeError as e_json_reload:
+                print(f"[STREAMING RELOAD] Error decoding JSON from '{load_file_path_stream_reload}': {e_json_reload}. Cache is empty.")
+            # update_chunks will then handle loading from this new cache.
+            return
+
+        load_file_path_actual = os.path.join('save', save_filename_to_load)
+        if not os.path.exists(load_file_path_actual):
+            print(f"Save file '{load_file_path_actual}' not found for loading. Generating new world.")
+            self.generate_all_chunks() # Non-streaming default
+            return
+
+        print(f"Loading world from '{load_file_path_actual}'...")
+        self.vworld.chunks.clear() # Clear any existing data
+
+        try:
+            with open(load_file_path_actual, 'r') as f_load:
+                loaded_world_data = json.load(f_load)
+
+            # Load world settings if they exist in the save file
+            saved_settings = loaded_world_data.get("world_settings")
+            if saved_settings:
+                CHUNK_SIZE = saved_settings.get("chunk_size", CHUNK_SIZE)
+                WORLD_SIZE = saved_settings.get("world_radius_chunks", WORLD_SIZE)
+                print(f"Loaded settings from save: ChunkSize={CHUNK_SIZE}, WorldRadius={WORLD_SIZE}")
+            
+            loaded_chunks_data = loaded_world_data.get("chunks", {})
+            for json_chunk_key_load, blocks_dict_load in loaded_chunks_data.items():
+                try:
+                    cx_ld, cz_ld = map(int, json_chunk_key_load.split(','))
+                    chunk_coord_ld = (cx_ld, cz_ld)
+                    
+                    # Create chunk instance, generate_terrain=False as we're loading its blocks
+                    newly_loaded_chunk = Chunk(self.vworld, chunk_coord_ld, generate_terrain_on_init=False)
+                    
+                    for json_block_key_load, block_val_load in blocks_dict_load.items():
+                        try:
+                            bx_ld, by_ld, bz_ld = map(int, json_block_key_load.split(','))
+                            newly_loaded_chunk.blocks[(bx_ld, by_ld, bz_ld)] = block_val_load
+                        except ValueError: pass # Skip malformed block keys
+                    
+                    self.chunks[chunk_coord_ld] = newly_loaded_chunk
+                except ValueError: pass # Skip malformed chunk keys
+            
+            # After all blocks loaded, build meshes and (for non-streaming) create special entities
+            for chunk_coord_loaded, loaded_chunk_inst_build in self.chunks.items():
+                loaded_chunk_inst_build.build_mesh() # Build visual mesh
+                
+                # Re-create special entities (Doors, Pokeballs etc.) based on loaded block data
+                # This is for non-streaming mode full load.
+                # For streaming, special entities are handled per-chunk in update_chunks.
+                if not self.streaming_mode:
+                    # Construct the string key as it would be in saved_chunk_data
+                    # to pass to a potential common helper, or inline logic carefully.
+                    # Here, we directly iterate this specific chunk's blocks.
+                    for b_pos_special_load, b_data_special_load in loaded_chunk_inst_build.blocks.items():
+                        actual_type_special_load = b_data_special_load
+                        rot_special_load = 0
+                        if isinstance(b_data_special_load, dict):
+                            actual_type_special_load = b_data_special_load.get("type", b_data_special_load)
+                            rot_special_load = b_data_special_load.get("rotation", 0)
+
+                        # Ensure global entity dicts are used
+                        if actual_type_special_load == DOOR and b_pos_special_load not in door_entities:
+                            door_ent = Door(b_pos_special_load); door_ent.pivot.rotation_y = rot_special_load
+                            door_entities[b_pos_special_load] = door_ent
+                        elif actual_type_special_load == POKEBALL and b_pos_special_load not in pokeball_entities:
+                            pb_ent = PokeballEntity(b_pos_special_load); pb_ent.rotation_y = rot_special_load
+                            pokeball_entities[b_pos_special_load] = pb_ent
+                        elif actual_type_special_load == FOXFOX and b_pos_special_load not in foxfox_entities:
+                            ff_ent = FoxfoxEntity(b_pos_special_load); ff_ent.rotation_y = rot_special_load
+                            foxfox_entities[b_pos_special_load] = ff_ent
+                        # ParticleBlockEntity might need special handling here if it's managed globally
+
+            print("World loaded successfully from file (non-streaming).")
+
+        except json.JSONDecodeError as e_json_decode:
+            print(f"Error decoding JSON from '{load_file_path_actual}': {e_json_decode}. Generating new world.")
+            self.generate_all_chunks()
+        except Exception as e_load_other:
+            print(f"An unexpected error occurred loading world: {e_load_other}. Generating new world.")
+            self.generate_all_chunks()
+
+
+    def set_block(self, world_pos_set, block_type_to_set):
+        self.vworld.set_block(world_pos_set, block_type_to_set)
+
+    def get_block(self, world_pos_get):
+        return self.vworld.get_block(world_pos_get)
+
 
 #############################################
-# 17) Menus
+# 17) Menus (Globals are now defined near top of section 19)
 #############################################
-current_save_name = "world_save.json"
-CHUNK_SIZE = 4
-WORLD_SIZE = 4
-world = None
-player = None
-game_menu = None
-inventory_ui = None
-sky = None
-vox_time_text = None
-local_time_text = None
-song_text = None
-coords_text = None
-compass_text = None
+current_save_name = "my_world.json" # Default save name
+CHUNK_SIZE = 16 # Default chunk dimensions (can be changed by New Game menu)
+WORLD_SIZE = 4  # Default world radius in chunks for non-streaming (can be changed)
+BIOME_NOISE_FREQUENCY = 0.008 # Moved here to be global
 
 #############################################
 # New Helper: Find Safe Spawn Height
 #############################################
-def find_safe_spawn_height(world, x, z):
-    """Find the highest solid block at given x,z coordinates"""
-    for y in range(50, -1, -1):
-        if world.get_block((x, y-1, z)) in ['grass', 'stone', 'dirt']:
-            return y + 1
-    return 25
+def find_safe_spawn_height(world_to_check, x_coord_spawn, z_coord_spawn):
+    # Scan from a reasonable height downwards to find solid ground
+    # Max height for scan could be related to max_height_gen used in Chunk.generate_terrain
+    y_scan_start = 30 
+    y_scan_end = -20 
+    for y_coord_s in range(y_scan_start, y_scan_end - 1, -1):
+        block_below_player = world_to_check.get_block((x_coord_spawn, y_coord_s -1, z_coord_spawn))
+        # Check for common non-water, solid blocks suitable for spawning
+        if block_below_player and block_below_player != 'water': # Simplified check
+            return y_coord_s # Spawn on top of this block
+    return 25 # Fallback spawn height if no suitable ground found
+
 
 #############################################
-# Menus: New Game, Start, Load, Save
+# Menus: New Game, Start, Load, Save (Class definitions from before, ensure they use globals correctly)
 #############################################
 class NewGameMenu(Entity):
     def __init__(self):
-        super().__init__(parent=camera.ui)
+        super().__init__(parent=camera.ui, ignore_paused=True)
         mouse.locked = False
         mouse.visible = True
-        self.panel = Panel(parent=self, scale=(0.6,0.7), color=color.azure)
-        Text(parent=self.panel, text='Enter World Settings', y=0.3, scale=1.2)
-        Text(parent=self.panel, text='Chunk Size (blocks per side):', x=-0.25, y=0.1)
-        self.chunk_size_field = InputField(parent=self.panel, scale=(0.2,0.1), x=0.15, y=0.1, text='4')
-        Text(parent=self.panel, text='World Size (chunks per side):', x=-0.25, y=-0.05)
-        self.world_size_field = InputField(parent=self.panel, scale=(0.2,0.1), x=0.15, y=-0.05, text='4')
-        self.calc_text = Text(parent=self.panel, text='', y=-0.2, scale=0.8)
-        self.update_calc_text()
-        Button(parent=self.panel, text='Start!', y=-0.35, scale=(0.3,0.1), on_click=self.start_game)
-        Button(parent=self.panel, text='Back', y=-0.45, scale=(0.3,0.1), on_click=self.go_back)
-        self.chunk_size_field.on_value_changed = self.update_calc_text
-        self.world_size_field.on_value_changed = self.update_calc_text
-    def update_calc_text(self):
+        self.panel = Panel(parent=self, scale=(0.6,0.7), color=color.color(0,0,0,0.8))
+        Text(parent=self.panel, text='New World Settings', y=0.4, origin=(0,0), scale=1.3)
+        
+        y_offset_ngm = 0.25
+        # Chunk Size
+        Text(parent=self.panel, text='Chunk Size (e.g., 16):', x=-0.4, y=y_offset_ngm, origin=(-0.5,0))
+        self.chunk_size_input = InputField(parent=self.panel, x=0.2, y=y_offset_ngm, limit_content_to="0123456789", default_value=str(CHUNK_SIZE))
+        y_offset_ngm -= 0.15
+        # World Size (Radius for non-streaming, View distance factor for streaming)
+        Text(parent=self.panel, text='World Radius (chunks, e.g., 4):', x=-0.4, y=y_offset_ngm, origin=(-0.5,0))
+        self.world_size_input = InputField(parent=self.panel, x=0.2, y=y_offset_ngm, limit_content_to="0123456789", default_value=str(WORLD_SIZE))
+        y_offset_ngm -=0.15
+        # World Name
+        Text(parent=self.panel, text='World Name:', x=-0.4, y=y_offset_ngm, origin=(-0.5,0))
+        self.world_name_input = InputField(parent=self.panel, x=0.2, y=y_offset_ngm, default_value="My 자동 생성 World")
+
+
+        y_offset_ngm -= 0.2
+        Button(parent=self.panel, text='Create World', y=y_offset_ngm -0.05, scale=(0.4,0.1), color=color.azure, on_click=self.action_start_new_game)
+        Button(parent=self.panel, text='Back to Main Menu', y=y_offset_ngm - 0.18, scale=(0.4,0.08), on_click=self.action_go_back)
+
+    def action_start_new_game(self):
+        global CHUNK_SIZE, WORLD_SIZE, current_save_name
         try:
-            cs = int(self.chunk_size_field.text)
-        except:
-            cs = 4
+            cs = int(self.chunk_size_input.text)
+            CHUNK_SIZE = max(8, min(cs, 32)) # Clamp chunksize e.g. 8-32
+        except ValueError: CHUNK_SIZE = 16 # Default
         try:
-            ws = int(self.world_size_field.text)
-        except:
-            ws = 4
-        blocks_per_chunk = cs * 300 * cs
-        total_chunks = (2*ws)**2
-        self.calc_text.text = f"Each chunk: {cs}×300×{cs} = {blocks_per_chunk} blocks\nTotal chunks: {total_chunks}"
-    def start_game(self):
-        try:
-            cs = int(self.chunk_size_field.text)
-        except:
-            cs = 4
-        try:
-            ws = int(self.world_size_field.text)
-        except:
-            ws = 4
-        global CHUNK_SIZE, WORLD_SIZE
-        CHUNK_SIZE = cs
-        WORLD_SIZE = ws
-        streaming_mode = True if ws > 10 else False
+            ws = int(self.world_size_input.text)
+            WORLD_SIZE = max(1, min(ws, 16)) # Clamp world radius e.g. 1-16
+        except ValueError: WORLD_SIZE = 4 # Default
+        
+        world_name_text = self.world_name_input.text.strip()
+        if not world_name_text: world_name_text = "NewWorld"
+        current_save_name = "".join(c for c in world_name_text if c.isalnum() or c in (' ','_')).rstrip() + ".json"
+        if not current_save_name.endswith(".json"): current_save_name += ".json"
+
+
+        # Determine streaming based on total chunks (World is (2*R+1) x (2*R+1) chunks if R is radius)
+        total_world_chunks_dim = (2 * WORLD_SIZE + 1)
+        use_streaming_ngm = True if total_world_chunks_dim**2 > 100 else False # e.g. >10x10 area
+
         destroy(self)
-        create_game(filename=None, force_new=True, streaming_mode=streaming_mode)
-    def go_back(self):
+        create_game(filename=current_save_name, force_new_world=True, use_streaming_mode=use_streaming_ngm)
+
+    def action_go_back(self):
         destroy(self)
         StartMenu()
 
+
 class StartMenu(Entity):
     def __init__(self):
-        super().__init__(parent=camera.ui)
+        super().__init__(parent=camera.ui, ignore_paused=True) # Main menu should ignore pause
         mouse.locked = False
         mouse.visible = True
-        self.panel = Panel(parent=self, scale=(0.6,0.7), color=color.gray)
-        Text(parent=self.panel, text='Vox-World by DaddyCodymon', scale=1.5, y=0.3)
-        Button(parent=self.panel, text='New Game', y=0.05, scale=(0.3,0.1), on_click=self.go_new_game)
-        Button(parent=self.panel, text='Load Game', y=-0.05, scale=(0.3,0.1), on_click=self.go_load_game)
-        Button(parent=self.panel, text='Quit', y=-0.15, scale=(0.3,0.1), on_click=application.quit)
-    def go_new_game(self):
+        # Optional: Add a background image/panel
+        # Panel(parent=self, color=color.dark_gray, scale=(window.aspect_ratio, 1)) 
+        # Text(parent=self, text="Voxel Game Title", y=0.3, scale=3, origin=(0,0))
+        
+        menu_button_y_start = 0.1
+        menu_button_spacing = -0.12
+        Button(parent=self, text='New Game', y=menu_button_y_start, scale=(0.3,0.1), color=color.azure, on_click=self.action_new_game)
+        Button(parent=self, text='Load Game', y=menu_button_y_start + menu_button_spacing, scale=(0.3,0.1), color=color.azure, on_click=self.action_load_game)
+        Button(parent=self, text='Quit Game', y=menu_button_y_start + 2*menu_button_spacing, scale=(0.3,0.1), color=color.red, on_click=application.quit)
+
+    def action_new_game(self):
         destroy(self)
         NewGameMenu()
-    def go_load_game(self):
+    def action_load_game(self):
         destroy(self)
         LoadGameMenu()
 
 class LoadGameMenu(Entity):
     def __init__(self):
-        super().__init__(parent=camera.ui)
+        super().__init__(parent=camera.ui, ignore_paused=True)
         mouse.locked = False
         mouse.visible = True
-        self.panel = Panel(parent=self, scale=(0.6,0.7), color=color.gray)
-        Text(parent=self.panel, text='Select a .json to load:', y=0.3)
-        y_offset = 0.2
-        save_folder = 'save'
-        file_list = []
-        if os.path.exists(save_folder):
-            file_list = [f for f in os.listdir(save_folder) if f.lower().endswith('.json')]
-        if not file_list:
-            Text(parent=self.panel, text='(No .json found in /save)', y=0)
+        self.panel = Panel(parent=self, scale_x=0.7, scale_y=0.8, color=color.color(0,0,0,0.8))
+        Text(parent=self.panel, text='Load Saved World', y=0.45, origin=(0,0))
+
+        save_files_path = 'save'
+        json_save_files = [f for f in os.listdir(save_files_path) if f.endswith('.json')] if os.path.exists(save_files_path) else []
+        
+        y_button_offset_load = 0.3
+        if not json_save_files:
+            Text(parent=self.panel, text='No save files found.', y=0, origin=(0,0))
         else:
-            for fname in file_list:
-                def load_func(fn=fname):
-                    return lambda: self.load_selected(fn)
-                Button(parent=self.panel, text=fname, y=y_offset, scale=(0.4,0.1), on_click=load_func(fname))
-                y_offset -= 0.12
-        Button(parent=self.panel, text='Back', y=-0.25, scale=(0.3,0.1), on_click=self.go_back)
-    def load_selected(self, filename):
+            for idx, filename_load in enumerate(json_save_files):
+                if idx >= 5: Text(parent=self.panel, text=f"...and {len(json_save_files)-5} more", y=y_button_offset_load - 0.05); break # Limit displayed files
+                btn_load = Button(parent=self.panel, text=filename_load, y=y_button_offset_load, scale_x=0.9, scale_y=0.12)
+                btn_load.on_click = Func(self.action_load_selected_world, filename_load) # Use Func for arguments
+                y_button_offset_load -= 0.15
+        
+        Button(parent=self.panel, text='Back', y=-0.4, scale=(0.3,0.1), on_click=self.action_go_back_load)
+
+    def action_load_selected_world(self, filename_to_load_selected):
         global current_save_name
-        current_save_name = filename
+        current_save_name = filename_to_load_selected
+        
+        # Heuristic for streaming: if file size > 500KB, enable streaming.
+        # This is a placeholder, could be more sophisticated (e.g. read metadata from JSON)
+        use_streaming_load = False
+        try:
+            file_path_load_check = os.path.join('save', filename_to_load_selected)
+            if os.path.exists(file_path_load_check) and os.path.getsize(file_path_load_check) > 500 * 1024:
+                use_streaming_load = True
+        except OSError: pass # Ignore if file check fails
+
         destroy(self)
-        create_game(filename=filename, force_new=False)
-    def go_back(self):
+        create_game(filename=filename_to_load_selected, force_new_world=False, use_streaming_mode=use_streaming_load)
+
+    def action_go_back_load(self):
         destroy(self)
         StartMenu()
 
+
 class SaveAsMenu(Entity):
-    def __init__(self, parent_menu):
-        super().__init__(parent=camera.ui)
-        self.parent_menu = parent_menu
-        self.parent_menu.enabled = False
-        self.panel = Panel(parent=self, scale=(0.5,0.3), color=color.gray)
-        Text(parent=self.panel, text='Save File Name:', y=0.1)
-        self.input_field = InputField(parent=self.panel, scale=(0.5,0.08), y=0)
-        self.input_field.text = current_save_name
-        Button(parent=self.panel, text='Confirm', color=color.azure, y=-0.1, scale=(0.3,0.1), on_click=self.confirm_save)
-        Button(parent=self.panel, text='Cancel', color=color.red, y=-0.22, scale=(0.3,0.1), on_click=self.cancel)
-    def confirm_save(self):
-        fn = self.input_field.text.strip()
-        if not fn.lower().endswith('.json'):
-            fn += '.json'
-        destroy(self)
-        self.parent_menu.save_and_quit(fn)
-    def cancel(self):
-        self.parent_menu.enabled = True
+    def __init__(self, game_menu_parent_ref): # Expecting the GameMenu instance
+        super().__init__(parent=camera.ui, ignore_paused=True)
+        self.game_menu_ref = game_menu_parent_ref
+        self.game_menu_ref.enabled = False # Disable game menu while this is up
+
+        self.panel = Panel(parent=self, scale=(0.5,0.35), color=color.dark_gray)
+        Text(parent=self.panel, text='Save World As:', y=0.3, origin=(0,0))
+        self.filename_input_save = InputField(parent=self.panel, default_value=current_save_name, y=0.05, scale_x=0.9)
+        Button(parent=self.panel, text='Save', color=color.azure, y=-0.15, scale=(0.3,0.15), on_click=self.action_confirm_and_save)
+        Button(parent=self.panel, text='Cancel', y=-0.32, scale=(0.3,0.1), on_click=self.action_cancel_save)
+
+    def action_confirm_and_save(self):
+        new_filename_save = self.filename_input_save.text.strip()
+        if not new_filename_save: new_filename_save = "UnnamedWorld"
+        if not new_filename_save.lower().endswith(".json"):
+            new_filename_save += ".json"
+        
+        self.game_menu_ref.execute_save_and_quit(new_filename_save) # Call method on GameMenu
+        destroy(self) # Destroy SaveAsMenu
+
+    def action_cancel_save(self):
+        self.game_menu_ref.enabled = True # Re-enable GameMenu
         destroy(self)
 
-class GameMenu(Entity):
+
+class GameMenu(Entity): # In-game pause menu
     def __init__(self):
-        super().__init__(parent=camera.ui, enabled=False)
-        self.panel = Panel(parent=self, scale=(0.5,0.6), color=color.dark_gray)
-        Text(parent=self.panel, text='Game Menu', y=0.3)
-        Button(parent=self.panel, text='Save & Quit', y=0, scale=(0.3,0.1), on_click=self.ask_save_name)
-        Button(parent=self.panel, text='Resume', y=0.1, scale=(0.3,0.1), on_click=self.resume_game)
-        self.music_button = Button(parent=self.panel, text='Music: ON', y=-0.1, scale=(0.3,0.1), on_click=self.toggle_music)
-    def ask_save_name(self):
-        SaveAsMenu(self)
-    def save_and_quit(self, chosen_name):
+        super().__init__(parent=camera.ui, enabled=False, ignore_paused=True) # Start disabled
+        self.panel = Panel(parent=self, scale=(0.4,0.5), color=color.color(0,0,0,0.8))
+        Text(parent=self.panel, text='Game Paused', y=0.4, origin=(0,0))
+        
+        btn_y = 0.2
+        Button(parent=self.panel, text='Resume Game', y=btn_y, scale=(0.8,0.15), color=color.green, on_click=self.action_resume)
+        btn_y -= 0.2
+        self.music_btn_game_menu = Button(parent=self.panel, text=f'Music: {"ON" if music_on else "OFF"}', 
+                                          y=btn_y, scale=(0.8,0.15), on_click=self.action_toggle_music)
+        btn_y -= 0.2
+        Button(parent=self.panel, text='Save & Quit', y=btn_y, scale=(0.8,0.15), color=color.red, on_click=self.action_save_quit_prompt)
+
+    def action_resume(self):
+        self.enabled = False
+        if player: player.enable()
+        mouse.locked = True
+        mouse.visible = False
+
+    def action_toggle_music(self):
+        global music_on, current_music
+        music_on = not music_on
+        self.music_btn_game_menu.text = f'Music: {"ON" if music_on else "OFF"}'
+        if not music_on and current_music and current_music.playing:
+            current_music.pause()
+        elif music_on : # If turning on
+            if current_music and not current_music.playing:
+                 if current_music.time > 0 and current_music.length > 0 and current_music.time < current_music.length:
+                    current_music.resume()
+                 else: start_random_music() # Was finished or not started
+            elif not current_music:
+                start_random_music()
+
+
+    def action_save_quit_prompt(self):
+        SaveAsMenu(self) # Show the "Save As" dialog, passing self
+
+    def execute_save_and_quit(self, final_filename_to_save): # Called by SaveAsMenu
         global current_save_name
-        current_save_name = chosen_name
+        current_save_name = final_filename_to_save
         if world:
             world.save_world()
         application.quit()
-    def resume_game(self):
-        self.enabled = False
-        mouse.locked = True
-        mouse.visible = False
-        player.enable()
-    def toggle_music(self):
-        global music_on
-        music_on = not music_on
-        if not music_on:
-            if current_music and current_music.playing:
-                current_music.pause()
-            self.music_button.text = 'Music: OFF'
-        else:
-            self.music_button.text = 'Music: ON'
-            if current_music and not current_music.playing:
-                current_music.resume()
-            else:
-                if not current_music:
-                    start_random_music()
+
 
 #############################################
 # 18) Update Shader Uniforms (Simplified)
 #############################################
-def update_shader_uniforms():
-    if player:
-        sun_angle = (time.time()-start_time)/full_cycle_time*2*pi
-        scene.set_shader_input("time_of_day", sun_angle)
-        sky.set_shader_input("time_of_day", sun_angle)
+def update_shader_uniforms(): # Called every frame in main update
+    if player and sky and hasattr(sky, 'shader'): # Ensure sky and its shader are ready
+        current_time_in_cycle = (time.time() - start_time) % full_cycle_time
+        sun_angle_shader = (current_time_in_cycle / full_cycle_time) * 2 * pi
+        
+        # Apply to scene (for block_lighting_shader) and sky (for daynight_shader)
+        scene.set_shader_input("time_of_day", sun_angle_shader)
+        if sky.shader: # Double check shader on sky
+             sky.set_shader_input("time_of_day", sun_angle_shader)
 
 #############################################
-# 19) New Safe Spawn Helper & Create Game Function
+# 19) Create Game Function 
 #############################################
-def find_safe_spawn_height(world, x, z):
-    """Find the highest solid block at given x,z coordinates"""
-    for y in range(50, -1, -1):
-        if world.get_block((x, y-1, z)) in ['grass', 'stone', 'dirt']:
-            return y + 1
-    return 25
-
-full_cycle_time = 20*60
-start_time = time.time()
+# Global game state variables (defined earlier, ensure they are accessible)
+full_cycle_time = 20 * 60  # e.g., 20 minutes for a full day-night cycle
+start_time = time.time()  # Real-world time game logic started or day cycle began
 
 world = None
 player = None
-game_menu = None
+game_menu = None # In-game pause menu
 inventory_ui = None
-sky = None
-vox_time_text = None
-local_time_text = None
-song_text = None
-coords_text = None
-compass_text = None
+sky = None # Sky entity
+# UI Text elements
+vox_time_text, local_time_text, song_text, coords_text, compass_text = None,None,None,None,None
+last_chunk_update_time = 0 # For streaming mode chunk update throttling
 
-last_chunk_update = 0
+def create_game(filename=None, force_new_world=False, use_streaming_mode=False):
+    global world, player, game_menu, inventory_ui, sky
+    global vox_time_text, local_time_text, song_text, coords_text, compass_text
+    global start_time, CHUNK_SIZE, WORLD_SIZE # Make sure these are global
 
-def create_game(filename=None, force_new=False, streaming_mode=False):
-    global world, player, game_menu, inventory_ui, sky, vox_time_text, local_time_text, song_text, coords_text, compass_text
-    for e in camera.ui.children[:]:
-        if e is not mouse:
-            destroy(e)
-    print("\n[GAME] Creating game now...")
-    global bubble_timer
-    bubble_timer = 0
-    global CHUNK_SIZE, WORLD_SIZE
-    world = World(filename=filename, force_new=force_new, streaming_mode=streaming_mode)
-    player = CustomPlayer()
-    spawn_x, spawn_z = 0, 0
-    safe_y = find_safe_spawn_height(world, spawn_x, spawn_z)
-    player.position = Vec3(spawn_x, safe_y, spawn_z)
-    def ensure_safe_spawn():
-        if player.position.y < 0:
-            player.position = Vec3(spawn_x, safe_y, spawn_z)
-            player.velocity = Vec3(0, 0, 0)
-    invoke(ensure_safe_spawn, delay=0.5)
-    invoke(ensure_safe_spawn, delay=1.0)
-    player.model.hide()
+    # Clear previous UI (e.g., from main menu)
+    for child_ui in camera.ui.children[:]:
+        if child_ui not in (mouse, Tooltip.default_tooltip): # Keep mouse and default tooltip
+            destroy(child_ui)
+
+    print(f"[GAME INIT] Creating world. File: {filename}, New: {force_new_world}, Stream: {use_streaming_mode}")
+    print(f"[SETTINGS] ChunkSize: {CHUNK_SIZE}, WorldRadius: {WORLD_SIZE} (for non-streamed generation)")
+
+    start_time = time.time() # Reset day cycle timer for new game
+
+    world = World(filename=filename, force_new_world=force_new_world, use_streaming_mode=use_streaming_mode)
+    player = CustomPlayer() # Create player instance
+
+    spawn_x_player, spawn_z_player = 0.5, 0.5 # Try to spawn near center of a block
+    safe_y_player = find_safe_spawn_height(world, spawn_x_player, spawn_z_player)
+    player.position = Vec3(spawn_x_player, safe_y_player, spawn_z_player)
+    
+    # Delayed check to prevent falling through world if spawn calculation is slow/off
+    invoke(lambda: player.position.y if player.y < -10 else None, player.y == find_safe_spawn_height(world, player.x, player.z) + 0.5, delay=1.0)
+
+    player.model.visible = False # Hide default FPC model if custom is used or no model desired
     player.rotation = (0,0,0)
-    player.camera_pivot.rotation = (0,0,0)
+    player.camera_pivot.rotation = (0,0,0) # Reset pitch
+
     game_menu = GameMenu()
     inventory_ui = InventoryUI()
-    sky = Entity(model='sphere', scale=500, double_sided=True, shader=daynight_shader)
-    sky.set_shader_input("time_of_day", 0.0)
+    sky = Entity(model='sphere', texture='sky_default', scale=500, double_sided=True, shader=daynight_shader) # Ensure sky_default texture exists or remove
+    if not sky.texture: sky.color = color.skyblue # Fallback sky color
+    sky.set_shader_input("time_of_day", 0.5) # Mid-day start for shader
+
     init_music()
-    vox_time_text = Text(text='Vox Time: ', parent=camera.ui, position=(0.5,0.45), scale=1.2)
-    local_time_text = Text(text='Local Time:', parent=camera.ui, position=(0.5,0.40), scale=1.2)
-    song_text = Text(text='Song: None', parent=camera.ui, position=(0.45,0.35), scale=1.2)
-    coords_text = Text(text='Coords: X=0 Y=0 Z=0', parent=camera.ui, position=(-0.85,0.45), scale=1.2)
-    compass_text = Text(text='Facing: ' + get_cardinal(player.rotation_y), parent=camera.ui, position=(-0.85,0.40), scale=1.2)
+
+    # UI Text elements setup (positions can be fine-tuned)
+    text_scale_val = 1.1
+    vox_time_text = Text(parent=camera.ui, position=window.top_right - Vec2(0.02,0.02), origin=(1,1), scale=text_scale_val)
+    local_time_text = Text(parent=camera.ui, position=window.top_right - Vec2(0.02,0.06), origin=(1,1), scale=text_scale_val)
+    song_text = Text(parent=camera.ui, position=window.top_right - Vec2(0.02,0.10), origin=(1,1), scale=text_scale_val,text="Song: Loading...")
+    coords_text = Text(parent=camera.ui, position=window.top_left + Vec2(0.02,-0.02), origin=(-1,1), scale=text_scale_val)
+    compass_text = Text(parent=camera.ui, position=window.top_left + Vec2(0.02,-0.06), origin=(-1,1), scale=text_scale_val)
+
     mouse.locked = True
     mouse.visible = False
-    print("[GAME] Game created successfully.")
+    if player: player.enable()
+    
+    # Initial chunk load for streaming mode around player
+    if use_streaming_mode and world:
+        world.update_chunks(player.position)
+
+    print("[GAME INIT] Game creation complete.")
+
 
 #############################################
 # 20) Main Update Function
 #############################################
 def update():
-    global last_chunk_update
+    global last_chunk_update_time 
+
+    if not player or not world : return # Essential components not ready
+
     update_shader_uniforms()
     update_music()
-    process_water_spread()
-    if world and world.streaming_mode:
-        if time.time()-last_chunk_update > 0.5:
+    process_water_spread() 
+    spawn_bubbles_update() # Handle bubble spawning if player is underwater
+
+    if world.streaming_mode:
+        if time.time() - last_chunk_update_time > 0.2: # Stream chunks slightly more often
             world.update_chunks(player.position)
-            last_chunk_update = time.time()
-    if free_cam_mode:
-        return
-    if not player:
-        return
-    if inventory_ui and inventory_ui.inventory_open:
-        inventory_ui.update()
-        return
-    if vox_time_text and local_time_text and song_text:
-        in_game_seconds = (time.time()-start_time)%full_cycle_time
-        total_in_game_minutes = in_game_seconds/full_cycle_time*24*60
-        hours_24 = int(total_in_game_minutes//60)%24
-        minute = int(total_in_game_minutes%60)
-        if hours_24==0:
-            hour = 12; ampm = 'AM'
-        elif hours_24<12:
-            hour = hours_24; ampm = 'AM'
-        elif hours_24==12:
-            hour = 12; ampm = 'PM'
-        else:
-            hour = hours_24-12; ampm = 'PM'
-        vox_time_text.text = f"Vox Time: {hour:02d}:{minute:02d} {ampm}"
-        local_time_text.text = "Local Time: " + time.strftime("%I:%M %p")
-        if current_track:
-            from os.path import basename
-            song_text.text = "Song: " + basename(current_track)
-        else:
-            song_text.text = "Song: None"
-    if coords_text and compass_text:
-        coords_text.text = f"Coords: X={player.x:.1f} Y={player.y:.1f} Z={player.z:.1f}"
-        compass_text.text = "Facing: " + get_cardinal(player.rotation_y)
+            last_chunk_update_time = time.time()
+
+    if free_cam_mode: 
+        if free_cam and free_cam.enabled: free_cam.update() # Make sure free_cam has update method
+        return # Skip player/game logic if free cam is active
+
+    if inventory_ui and inventory_ui.inventory_open_state: # Check state variable
+        inventory_ui.update() # For drag icon, etc.
+        return 
+    
     if game_menu and game_menu.enabled:
-        return
-    if time.time()-player.last_click_time > 0.15:
-        if mouse.left:
-            remove_block()
-            player.last_click_time = time.time()
-        elif mouse.right:
-            slot = inventory_ui.hotbar_data[inventory_ui.hotbar_selected]
-            if not slot:
-                return
-            btype = slot['item']
-            place_block(btype)
-            slot['count'] -= 1
-            if slot['count'] <= 0:
-                inventory_ui.hotbar_data[inventory_ui.hotbar_selected] = None
-            player.last_click_time = time.time()
+        return # Game menu is open
+
+    # Update UI Text
+    current_game_time_sec = (time.time() - start_time) % full_cycle_time
+    hours_game = int((current_game_time_sec / full_cycle_time) * 24)
+    minutes_game = int(((current_game_time_sec / full_cycle_time) * 24 * 60) % 60)
+    ampm_game = "AM" if hours_game < 12 or hours_game == 24 else "PM"
+    display_hour_game = hours_game % 12
+    if display_hour_game == 0: display_hour_game = 12
+    if vox_time_text: vox_time_text.text = f"VoxTime: {display_hour_game:02d}:{minutes_game:02d} {ampm_game}"
+    if local_time_text: local_time_text.text = "Local: " + time.strftime("%I:%M %p")
+    if song_text: 
+        song_name = os.path.basename(current_track).rsplit('.',1)[0] if current_track else "None"
+        song_text.text = f"Song: {song_name}"
+    if coords_text: coords_text.text = f"XYZ: {player.x:.1f}, {player.y:.1f}, {player.z:.1f}"
+    if compass_text: compass_text.text = "Face: " + get_cardinal(player.rotation_y)
+
+    # Player block interaction (moved from input to update for click cooldown)
+    if player.enabled and mouse.locked:
+        if time.time() - player.last_click_time > 0.2: # Slightly longer cooldown
+            if mouse.left:
+                remove_block()
+                player.last_click_time = time.time()
+            elif mouse.right:
+                if inventory_ui and inventory_ui.hotbar_data[inventory_ui.hotbar_selected_index]:
+                    item_to_place = inventory_ui.hotbar_data[inventory_ui.hotbar_selected_index]['item']
+                    place_block(item_to_place) 
+                    player.last_click_time = time.time()
+
 
 #############################################
 # 21) Raycast Helper Functions
 #############################################
-def do_raycast(distance=8):
-    if not player:
-        return None
+def do_raycast(distance_rc=10): # Increased default distance
+    if not player or not hasattr(player, 'camera_pivot'): return None
     return raycast(origin=player.camera_pivot.world_position,
                    direction=player.camera_pivot.forward,
-                   distance=distance, ignore=[player], debug=False)
-def get_pointed_block_coord(remove=True):
-    hit = do_raycast()
-    if hit and hit.hit:
-        shift = -0.001 if remove else 0.001
-        hp = hit.world_point + (hit.world_normal*shift)
-        bx = floor(hp.x)
-        by = floor(hp.y)
-        bz = floor(hp.z)
-        return (bx,by,bz), hit
-    else:
-        candidate = player.camera_pivot.world_position + player.camera_pivot.forward*2
-        base_candidate = (floor(candidate.x), floor(candidate.y), floor(candidate.z))
-        for dx in range(-1,2):
-            for dy in range(-1,2):
-                for dz in range(-1,2):
-                    pos = (base_candidate[0]+dx, base_candidate[1]+dy, base_candidate[2]+dz)
-                    if world and world.get_block(pos)==PARTICLE_BLOCK:
-                        return (pos,None)
+                   distance=distance_rc, ignore=[player], debug=False)
+
+def get_pointed_block_coord(is_removing_block=True):
+    hit_data = do_raycast()
+    if hit_data and hit_data.hit:
+        # If removing, target the block hit. If placing, target the block in front of the hit face.
+        offset_multiplier = 0.5 if is_removing_block else -0.5 # Small offset into or away from block
+        target_world_point = hit_data.world_point + hit_data.world_normal * offset_multiplier
+        
+        block_coord_final = (floor(target_world_point.x), 
+                             floor(target_world_point.y), 
+                             floor(target_world_point.z))
+        return block_coord_final, hit_data # Return coord and original hit_info
+    else: # Fallback for particle block interaction if raycast misses solid terrain
+        if not player or not hasattr(player, 'camera_pivot'): return None
+        # Check a point slightly in front of player for certain interactions
+        # This is less precise and should be used sparingly.
+        # check_pos_fallback = player.camera_pivot.world_position + player.camera_pivot.forward * 1.5
+        # coord_fallback = (floor(check_pos_fallback.x), floor(check_pos_fallback.y), floor(check_pos_fallback.z))
+        # if world and world.get_block(coord_fallback) == PARTICLE_BLOCK: # Example for specific block
+        #     return coord_fallback, None
         return None
+
 
 #############################################
 # 22) Place/Remove Block Functions
 #############################################
-def place_block(btype):
-    if not world:
+def place_block(block_type_place):
+    if not world or not player or not inventory_ui: return
+
+    placement_target_data = get_pointed_block_coord(is_removing_block=False) # False for placement
+    if not placement_target_data: return
+    (tx, ty, tz), _ = placement_target_data
+
+    # Prevent placing inside player's collider space
+    player_collider_min = player.position + player.collider.center - player.collider.size/2
+    player_collider_max = player.position + player.collider.center + player.collider.size/2
+    if player_collider_min.x < tx + 1 and player_collider_max.x > tx and        player_collider_min.y < ty + 1 and player_collider_max.y > ty and        player_collider_min.z < tz + 1 and player_collider_max.z > tz:
+        # print("Cannot place block inside player.")
         return
-    data = get_pointed_block_coord(remove=False)
-    if not data:
-        return
-    (bx,by,bz), hit = data
-    if btype==DOOR:
-        if world.get_block((bx,by,bz)):
-            return
-        d = Door((bx,by,bz))
-        door_entities[(bx,by,bz)] = d
-        world.set_block((bx,by,bz), DOOR)
-        return
-    elif btype==POKEBALL:
-        if world.get_block((bx,by,bz)):
-            return
-        pb = PokeballEntity((bx,by,bz))
-        pokeball_entities[(bx,by,bz)] = pb
-        world.set_block((bx,by,bz), {"type": POKEBALL, "rotation": pb.rotation_y})
-        return
-    elif btype==FOXFOX:
-        if world.get_block((bx,by,bz)):
-            return
-        ff = FoxfoxEntity((bx,by,bz))
-        foxfox_entities[(bx,by,bz)] = ff
-        world.set_block((bx,by,bz), {"type": FOXFOX, "rotation": ff.rotation_y})
-        return
-    elif btype==PARTICLE_BLOCK:
-        if world.get_block((bx,by,bz)):
-            return
-        pb = ParticleBlockEntity((bx,by,bz))
-        particleblock_entities[(bx,by,bz)] = pb
-        world.set_block((bx,by,bz), PARTICLE_BLOCK)
-        return
-    if not world.get_block((bx,by,bz)):
-        world.set_block((bx,by,bz), btype)
-        if btype=='water':
-            water_sound.play()
-            cx = (bx//CHUNK_SIZE)*CHUNK_SIZE
-            cz = (bz//CHUNK_SIZE)*CHUNK_SIZE
-            chunk = world.chunks.get((cx,cz))
-            if chunk:
-                chunk.build_mesh()
-            if player:
-                spread_water_slowly((bx,by,bz),5,direction=player.forward)
-            else:
-                spread_water_slowly((bx,by,bz),5,direction=Vec3(0,0,1))
-        elif btype=='sponge':
-            sponge_sound.play()
-            near_water = False
-            for dx in [-1,0,1]:
-                for dy in [-1,0,1]:
-                    for dz in [-1,0,1]:
-                        if dx==0 and dy==0 and dz==0:
-                            continue
-                        if world.get_block((bx+dx,by+dy,bz+dz))=='water':
-                            near_water = True
-                            break
-                    if near_water:
-                        break
-                if near_water:
-                    soak_up_water((bx,by,bz),5)
+
+    existing_block_at_place_target = world.get_block((tx, ty, tz))
+    # Allow placing in air (None) or replacing water
+    if existing_block_at_place_target is not None and existing_block_at_place_target != 'water':
+        # print(f"Cannot place block: target occupied by {existing_block_at_place_target}")
+        return 
+
+    # Special block types
+    if block_type_place == DOOR:
+        # Ensure space for door (e.g., two blocks high)
+        if world.get_block((tx,ty+1,tz)) is None or world.get_block((tx,ty+1,tz)) == 'water':
+            door_obj = Door((tx,ty,tz)); door_entities[(tx,ty,tz)] = door_obj
+            world.set_block((tx,ty,tz), {"type": DOOR, "bottom": True, "rotation": player.rotation_y}) # Mark bottom part
+            world.set_block((tx,ty+1,tz), {"type": DOOR, "bottom": False, "rotation": player.rotation_y}) # Mark top part
+        else: return # Not enough space
+    elif block_type_place == POKEBALL:
+        pb_obj = PokeballEntity((tx,ty,tz)); pokeball_entities[(tx,ty,tz)] = pb_obj
+        world.set_block((tx,ty,tz), {"type": POKEBALL, "rotation": player.rotation_y})
+    elif block_type_place == FOXFOX:
+        ff_obj = FoxfoxEntity((tx,ty,tz)); foxfox_entities[(tx,ty,tz)] = ff_obj
+        world.set_block((tx,ty,tz), {"type": FOXFOX, "rotation": player.rotation_y})
+    elif block_type_place == PARTICLE_BLOCK: # This is a regular block type now
+        world.set_block((tx,ty,tz), PARTICLE_BLOCK)
+        # ParticleBlockEntity could be used to manage effects *at* this block if needed,
+        # but the block itself is just data in the chunk.
+        # if (tx,ty,tz) not in particleblock_entities: # Create an effect manager if desired
+        #    particleblock_entities[(tx,ty,tz)] = ParticleBlockEntity((tx,ty,tz))
+    else: # Regular block
+        world.set_block((tx,ty,tz), block_type_place)
+        if block_type_place == 'water':
+            if water_sound: water_sound.play()
+            schedule_water_spread((tx,ty,tz), 5, player.forward if player else Vec3(0,0,1), delay=0.1)
+        elif block_type_place == 'sponge':
+            if sponge_sound: sponge_sound.play()
+            soak_up_water((tx,ty,tz), radius=4) # Sponge effect
+
+    # Decrement from inventory (this should be robust)
+    selected_slot_idx = inventory_ui.hotbar_selected_index
+    hotbar_item_data = inventory_ui.hotbar_data[selected_slot_idx]
+    if hotbar_item_data and hotbar_item_data['item'] == block_type_place:
+        hotbar_item_data['count'] -= 1
+        if hotbar_item_data['count'] <= 0:
+            inventory_ui.hotbar_data[selected_slot_idx] = None
+        inventory_ui.update_all_slots() # Refresh UI
+
 
 def remove_block():
-    if not world:
-        return
-    data = get_pointed_block_coord(remove=True)
-    if not data:
-        return
-    (bx,by,bz), hit = data
-    saved = world.get_block((bx,by,bz))
-    if isinstance(saved, dict):
-        existing_block = saved.get("type", saved)
-    else:
-        existing_block = saved
-    if not existing_block:
-        return
-    if existing_block==DOOR:
-        base = (bx,by,bz)
-        if base in door_entities:
-            d = door_entities[base]
-            d.disable()
-            Debris((bx,by,bz), existing_block)
-            del door_entities[base]
-        world.set_block((bx,by,bz), None)
-        return
-    if existing_block==POKEBALL:
-        base = (bx,by,bz)
-        if base in pokeball_entities:
-            pokeball_entities[base].disable()
-            del pokeball_entities[base]
-        for _ in range(8):
-            Debris((bx,by,bz), existing_block)
-        world.set_block((bx,by,bz), None)
-        return
-    if existing_block==FOXFOX:
-        base = (bx,by,bz)
-        if base in foxfox_entities:
-            foxfox_entities[base].disable()
-            del foxfox_entities[base]
-        for _ in range(8):
-            Debris((bx,by,bz), existing_block)
-        world.set_block((bx,by,bz), None)
-        return
-    if existing_block==PARTICLE_BLOCK:
-        base = (bx,by,bz)
-        if base in particleblock_entities:
-            particleblock_entities[base].disable()
-            del particleblock_entities[base]
-        for _ in range(32):
-            Debris((bx,by,bz), existing_block)
-        world.set_block((bx,by,bz), None)
-        return
-    world.set_block((bx,by,bz), None)
-    for _ in range(32):
-        Debris((bx,by,bz), existing_block)
-    dig_sound.play()
-    if existing_block in collectible_blocks:
-        spawn_pickup(existing_block, (bx,by,bz))
+    if not world or not player: return
+    removal_target_data = get_pointed_block_coord(is_removing_block=True)
+    if not removal_target_data: return
+    (rx, ry, rz), _ = removal_target_data
+
+    block_to_remove_data = world.get_block((rx,ry,rz))
+    if not block_to_remove_data: return # Nothing to remove
+
+    actual_block_type_removed = block_to_remove_data
+    is_special_dict = isinstance(block_to_remove_data, dict)
+    if is_special_dict:
+        actual_block_type_removed = block_to_remove_data.get("type", block_to_remove_data)
+
+    # Handle multi-block structures like doors
+    if actual_block_type_removed == DOOR:
+        # Remove both parts of the door if it's a two-block door
+        is_bottom_part = block_to_remove_data.get("bottom", True) if is_special_dict else True
+        other_part_y = ry + 1 if is_bottom_part else ry -1
+        world.set_block((rx,ry,rz), None)
+        world.set_block((rx,other_part_y,rz), None) # Remove other part
+        if (rx,ry,rz) in door_entities: destroy(door_entities.pop((rx,ry,rz)))
+        if (rx,other_part_y,rz) in door_entities: destroy(door_entities.pop((rx,other_part_y,rz))) # Also remove other entity if exists
+    elif actual_block_type_removed in [POKEBALL, FOXFOX, PARTICLE_BLOCK]: # Other special entities/blocks
+        world.set_block((rx,ry,rz), None) # Remove from world data
+        if actual_block_type_removed == POKEBALL and (rx,ry,rz) in pokeball_entities:
+            destroy(pokeball_entities.pop((rx,ry,rz)))
+        elif actual_block_type_removed == FOXFOX and (rx,ry,rz) in foxfox_entities:
+            destroy(foxfox_entities.pop((rx,ry,rz)))
+        # For PARTICLE_BLOCK, if it had an associated effect entity in particleblock_entities:
+        # if actual_block_type_removed == PARTICLE_BLOCK and (rx,ry,rz) in particleblock_entities:
+        #    destroy(particleblock_entities.pop((rx,ry,rz)))
+    else: # Regular block
+        world.set_block((rx,ry,rz), None)
+
+    if dig_sound: dig_sound.play()
+    for _ in range(random.randint(3, 6)): # Fewer debris
+        Debris((rx,ry,rz), actual_block_type_removed) # Pass the actual type string
+    
+    if actual_block_type_removed in collectible_blocks:
+        spawn_pickup(actual_block_type_removed, (rx,ry,rz))
+
 
 #############################################
 # 23) Input Handling
 #############################################
-def input(key):
-    if key=='tab':
-        if inventory_ui:
-            inventory_ui.toggle_inventory()
+def input(key_input): # Renamed arg to avoid conflict with 'key' variable in loops
+    global command_mode, command_input_field, free_cam_mode # Globals for state
+    
+    if not player or not inventory_ui or not game_menu: # Core components not ready
+        if key_input == 'escape': application.quit() # Basic quit if game not loaded
         return
-    if inventory_ui and inventory_ui.inventory_open:
-        inventory_ui.input(key)
+
+    # --- UI Mode Checks (Inventory, Game Menu, Command Input) ---
+    if key_input == 'tab' and not command_mode : # Toggle inventory if not typing command
+        inventory_ui.toggle_inventory()
+        return 
+    if inventory_ui.inventory_open_state:
+        inventory_ui.input(key_input) # Let inventory handle its input
         return
-    if key=='enter':
-        global command_mode, command_input_field
-        if not command_mode:
-            command_mode = True
-            if player:
-                player.disable()
-            mouse.locked = False
-            mouse.visible = True
-            command_input_field = InputField(parent=camera.ui, scale=(0.5,0.1),
-                                              position=(0,-0.3), background_color=color.rgba(0,0,0,150))
-            command_input_field.placeholder_text = "Enter command..."
-            return
-        else:
-            cmd = command_input_field.text.strip()
-            destroy(command_input_field)
-            command_input_field = None
+    if game_menu.enabled: # Game menu handles its own (button clicks)
+        if key_input == 'escape': game_menu.action_resume() # Allow Esc to close menu
+        return
+    if command_mode: # Command input field active
+        if key_input == 'enter': # Execute command
+            cmd_text_input = command_input_field.text.strip()
+            destroy(command_input_field); command_input_field = None
             command_mode = False
-            if player:
-                player.enable()
-            mouse.locked = True
-            mouse.visible = False
-            try:
-                if cmd.lower().startswith("set time"):
-                    parts = cmd.split()
-                    if len(parts)>=3:
-                        time_str = parts[2].lower()
-                        if time_str.endswith("am") or time_str.endswith("pm"):
-                            period = time_str[-2:]
-                            hour_part = time_str[:-2]
-                            hour_val = int(hour_part)
-                            if hour_val<1 or hour_val>12:
-                                print("Invalid hour. Use 1-12 with am/pm.")
-                                return
-                            hour_24 = 0 if (period=="am" and hour_val==12) else (hour_val if period=="am" else (12 if hour_val==12 else hour_val+12))
-                            desired_angle = (hour_24/24.0)*2*pi
-                            global start_time
-                            start_time = time.time() - (desired_angle*full_cycle_time)/(2*pi)
-                            print(f"Time set to {hour_val}{period.upper()} (24-hour: {hour_24}:00)")
-                        else:
-                            print("Time format error. Use e.g. '1am' or '2pm'.")
-                    else:
-                        print("Time command format error. Use 'Set time <hour><am/pm>'.")
-                elif cmd.lower().startswith("move"):
-                    parts = cmd.split()
-                    if len(parts)>=4:
-                        try:
-                            x_str = parts[1]
-                            y_str = parts[2]
-                            z_str = parts[3]
-                            x_val = float(x_str[1:]) if x_str.lower().startswith('x') else float(x_str)
-                            y_val = float(y_str[1:]) if y_str.lower().startswith('y') else float(y_str)
-                            z_val = float(z_str[1:]) if z_str.lower().startswith('z') else float(z_str)
-                            player.position = Vec3(x_val,y_val,z_val)
-                            print(f"Moved player to {x_val}, {y_val}, {z_val}")
-                        except Exception as e:
-                            print("Move command error:", e)
-                    else:
-                        print("Move command format error. Use 'Move x<number> y<number> z<number>'.")
-            except Exception as e:
-                print("Error processing command:", e)
-            return
-    if command_mode:
+            if player: player.enable()
+            mouse.locked = True; mouse.visible = False
+            process_command(cmd_text_input)
+        # InputField handles text input itself, so no other key processing here
         return
-    if game_menu and game_menu.enabled:
+
+    # --- Game World Interactions (Player must be enabled) ---
+    if key_input == 'enter' and not command_mode: # Open command input
+        command_mode = True
+        if player: player.disable()
+        mouse.locked = False; mouse.visible = True
+        command_input_field = InputField(parent=camera.ui, scale_x=0.8, scale_y=0.07,
+                                          position=(0, -0.45), text_color=color.black,
+                                          background_color=color.rgba(220,220,220,200))
+        command_input_field.placeholder = "Type command (e.g., 'fly', 'set time 14:30', 'spawn dirt 10')"
+        command_input_field.activate()
         return
-    if key=='v':
-        toggle_free_camera()
-        return
-    if not player:
-        return
-    if key=='escape':
+
+    if not player.enabled: return # Further inputs require player to be active
+
+    if key_input == 'escape': # Open/Close Game Menu
         game_menu.enabled = not game_menu.enabled
         mouse.locked = not game_menu.enabled
         mouse.visible = game_menu.enabled
-    elif key=='scroll up':
-        inventory_ui.hotbar_selected = (inventory_ui.hotbar_selected+1)%len(inventory_ui.hotbar_data)
-    elif key=='scroll down':
-        inventory_ui.hotbar_selected = (inventory_ui.hotbar_selected-1)%len(inventory_ui.hotbar_data)
-    elif key=='e':
-        hit = do_raycast()
-        if hit and hit.hit:
-            shift = -0.001
-            wp = hit.world_point+(hit.world_normal*shift)
-            bx = floor(wp.x)
-            by = floor(wp.y)
-            bz = floor(wp.z)
-            saved = world.get_block((bx,by,bz))
-            if isinstance(saved, dict):
-                block_type = saved.get("type", saved)
-            else:
-                block_type = saved
-            if block_type==DOOR:
-                if (bx,by,bz) in door_entities:
-                    door_entities[(bx,by,bz)].toggle()
-            elif block_type==POKEBALL:
-                play_sound_once(pokeball_sound)
-            elif block_type==FOXFOX:
-                play_sound_once(foxfox_sound)
-            elif block_type==PARTICLE_BLOCK:
-                if (bx,by,bz) in particleblock_entities:
-                    pb = particleblock_entities[(bx,by,bz)]
-                    print(f"Interacting with particle block at {(bx,by,bz)}. Current shrink index: {pb.shrink_index}")
-                    pb.shrink_index = (pb.shrink_index+1)%4
-                    scale_values = [0.1,0.075,0.05,0.025]
-                    pb.settings['size'] = scale_values[pb.shrink_index]
-                    pb.scale = scale_values[pb.shrink_index]
-                    print(f"New shrink index: {pb.shrink_index}. New particle size: {scale_values[pb.shrink_index]}")
-    elif key=='r':
-        hit = do_raycast()
-        if hit and hit.hit:
-            shift = -0.001
-            wp = hit.world_point+(hit.world_normal*shift)
-            bx = floor(wp.x)
-            by = floor(wp.y)
-            bz = floor(wp.z)
-            saved = world.get_block((bx,by,bz))
-            if isinstance(saved, dict):
-                block_type = saved.get("type", saved)
-            else:
-                block_type = saved
-            if block_type==PARTICLE_BLOCK:
-                if (bx,by,bz) in particleblock_entities:
-                    pb = particleblock_entities[(bx,by,bz)]
-                    if not hasattr(pb, 'density_index'):
-                        pb.density_index = 0
-                    density_values = [50,38,25,13]
-                    pb.density_index = (pb.density_index+1)%len(density_values)
-                    pb.settings['particle_count'] = density_values[pb.density_index]
-                    print(f"Particle block at {(bx,by,bz)}: New density: {density_values[pb.density_index]}")
-    elif key=='t':
-        hit = do_raycast()
-        if hit and hit.hit:
-            shift = -0.001
-            wp = hit.world_point+(hit.world_normal*shift)
-            bx = floor(wp.x)
-            by = floor(wp.y)
-            bz = floor(wp.z)
-            saved = world.get_block((bx,by,bz))
-            if isinstance(saved, dict):
-                block_type = saved.get("type", saved)
-            else:
-                block_type = saved
-            if block_type==PARTICLE_BLOCK:
-                if (bx,by,bz) in particleblock_entities:
-                    pb = particleblock_entities[(bx,by,bz)]
-                    if not hasattr(pb, 'start_color_index'):
-                        pb.start_color_index = 0
-                    start_color_options = [color.rgb(255,0,0), color.rgb(0,255,0), color.rgb(0,0,255), color.rgb(255,255,255)]
-                    pb.start_color_index = (pb.start_color_index+1)%len(start_color_options)
-                    pb.settings['start_color'] = start_color_options[pb.start_color_index]
-                    print(f"Particle block at {(bx,by,bz)}: New start color: {start_color_options[pb.start_color_index]}")
-    elif key=='y':
-        hit = do_raycast()
-        if hit and hit.hit:
-            shift = -0.001
-            wp = hit.world_point+(hit.world_normal*shift)
-            bx = floor(wp.x)
-            by = floor(wp.y)
-            bz = floor(wp.z)
-            saved = world.get_block((bx,by,bz))
-            if isinstance(saved, dict):
-                block_type = saved.get("type", saved)
-            else:
-                block_type = saved
-            if block_type==PARTICLE_BLOCK:
-                if (bx,by,bz) in particleblock_entities:
-                    pb = particleblock_entities[(bx,by,bz)]
-                    if not hasattr(pb, 'end_color_index'):
-                        pb.end_color_index = 0
-                    end_color_options = [color.rgb(255,255,0), color.rgb(255,0,255), color.rgb(0,255,255), color.rgb(0,0,0)]
-                    pb.end_color_index = (pb.end_color_index+1)%len(end_color_options)
-                    pb.settings['end_color'] = end_color_options[pb.end_color_index]
-                    print(f"Particle block at {(bx,by,bz)}: New end color: {end_color_options[pb.end_color_index]}")
-    elif key=='u':
-        hit = do_raycast()
-        if hit and hit.hit:
-            shift = -0.001
-            wp = hit.world_point+(hit.world_normal*shift)
-            bx = floor(wp.x)
-            by = floor(wp.y)
-            bz = floor(wp.z)
-            saved = world.get_block((bx,by,bz))
-            if isinstance(saved, dict):
-                block_type = saved.get("type", saved)
-            else:
-                block_type = saved
-            if block_type==PARTICLE_BLOCK:
-                if (bx,by,bz) in particleblock_entities:
-                    pb = particleblock_entities[(bx,by,bz)]
-                    if not hasattr(pb, 'gravity_index'):
-                        pb.gravity_index = 0
-                    gravity_values = [0.1,0.075,0.05,0.025]
-                    pb.gravity_index = (pb.gravity_index+1)%len(gravity_values)
-                    pb.settings['gravity'] = gravity_values[pb.gravity_index]
-                    print(f"Particle block at {(bx,by,bz)}: New gravity: {gravity_values[pb.gravity_index]}")
-    elif key=='i':
-        hit = do_raycast()
-        if hit and hit.hit:
-            shift = -0.001
-            wp = hit.world_point+(hit.world_normal*shift)
-            bx = floor(wp.x)
-            by = floor(wp.y)
-            bz = floor(wp.z)
-            saved = world.get_block((bx,by,bz))
-            if isinstance(saved, dict):
-                block_type = saved.get("type", saved)
-            else:
-                block_type = saved
-            if block_type==PARTICLE_BLOCK:
-                if (bx,by,bz) in particleblock_entities:
-                    pb = particleblock_entities[(bx,by,bz)]
-                    if not hasattr(pb, 'lifetime_index'):
-                        pb.lifetime_index = 0
-                    lifetime_values = [2,1.5,1,0.5]
-                    pb.lifetime_index = (pb.lifetime_index+1)%len(lifetime_values)
-                    pb.settings['lifetime'] = lifetime_values[pb.lifetime_index]
-                    print(f"Particle block at {(bx,by,bz)}: New lifetime: {lifetime_values[pb.lifetime_index]}")
-    elif key=='o':
-        hit = do_raycast()
-        if hit and hit.hit:
-            shift = -0.001
-            wp = hit.world_point+(hit.world_normal*shift)
-            bx = floor(wp.x)
-            by = floor(wp.y)
-            bz = floor(wp.z)
-            saved = world.get_block((bx,by,bz))
-            if isinstance(saved, dict):
-                block_type = saved.get("type", saved)
-            else:
-                block_type = saved
-            if block_type==PARTICLE_BLOCK:
-                if (bx,by,bz) in particleblock_entities:
-                    pb = particleblock_entities[(bx,by,bz)]
-                    if not hasattr(pb, 'speed_index'):
-                        pb.speed_index = 0
-                    speed_values = [2,1.5,1,0.5]
-                    pb.speed_index = (pb.speed_index+1)%len(speed_values)
-                    pb.settings['speed'] = speed_values[pb.speed_index]
-                    print(f"Particle block at {(bx,by,bz)}: New speed: {speed_values[pb.speed_index]}")
-    elif key=='m':
-        hit = do_raycast()
-        if hit and hit.hit:
-            shift = 0.001
-            wp = hit.world_point+(hit.world_normal*shift)
-            bx = floor(wp.x)
-            by = floor(wp.y)
-            bz = floor(wp.z)
-            saved = world.get_block((bx,by,bz))
-            if isinstance(saved, dict):
-                block_type = saved.get("type", saved)
-            else:
-                block_type = saved
-            if block_type==POKEBALL:
-                if (bx,by,bz) in pokeball_entities:
-                    entity = pokeball_entities[(bx,by,bz)]
-                    entity.rotate_self()
-                    world.set_block((bx,by,bz), {"type": POKEBALL, "rotation": entity.rotation_y})
-            elif block_type==FOXFOX:
-                if (bx,by,bz) in foxfox_entities:
-                    entity = foxfox_entities[(bx,by,bz)]
-                    entity.rotate_self()
-                    world.set_block((bx,by,bz), {"type": FOXFOX, "rotation": entity.rotation_y})
+        if game_menu.enabled: player.disable()
+        else: player.enable()
+
+    elif key_input.isdigit() and key_input != '0': # Hotbar 1-9
+        inventory_ui.hotbar_selected_index = int(key_input) - 1
+        inventory_ui.update_hotbar_highlight_pos()
+    elif key_input == '0': # Hotbar 0 (maps to 9th slot, index 8)
+        inventory_ui.hotbar_selected_index = 8 
+        inventory_ui.update_hotbar_highlight_pos()
+    elif key_input == 'scroll up':
+        inventory_ui.hotbar_selected_index = (inventory_ui.hotbar_selected_index - 1 + 9) % 9
+        inventory_ui.update_hotbar_highlight_pos()
+    elif key_input == 'scroll down':
+        inventory_ui.hotbar_selected_index = (inventory_ui.hotbar_selected_index + 1) % 9
+        inventory_ui.update_hotbar_highlight_pos()
+
+    elif key_input == 'v': toggle_free_camera()
+    elif key_input == 'f5': player.input('f5') # Player camera toggle
+
+    elif key_input == 'e': # Interact
+        pointed_interact_data = get_pointed_block_coord(is_removing_block=True)
+        if pointed_interact_data:
+            (pix, piy, piz), _ = pointed_interact_data
+            block_val_interact = world.get_block((pix,piy,piz))
+            block_type_actual_interact = block_val_interact.get("type") if isinstance(block_val_interact, dict) else block_val_interact
+
+            if block_type_actual_interact == DOOR and (pix,piy,piz) in door_entities:
+                door_entities[(pix,piy,piz)].toggle()
+            # Add other 'e' interactions for other blocks here (e.g. Pokeball, FoxFox sounds)
+            elif block_type_actual_interact == POKEBALL: play_sound_once(pokeball_sound)
+            elif block_type_actual_interact == FOXFOX: play_sound_once(foxfox_sound)
+
+    # Let player instance handle its own movement inputs via its FPC base class
+    if hasattr(player, 'input'): player.input(key_input)
+
+
+def process_command(cmd_full_str): # Command processing logic
+    global start_time, player, world # Access globals
+    if not cmd_full_str: return
+    parts_cmd = cmd_full_str.lower().split()
+    command_verb = parts_cmd[0]
+    args_cmd = parts_cmd[1:]
+
+    if command_verb == "set" and len(args_cmd) >= 2 and args_cmd[0] == "time":
+        time_str_cmd = args_cmd[1] # e.g., "6am", "18:30"
+        hour_set_cmd = -1
+        try:
+            if ":" in time_str_cmd: # HH:MM
+                h_cmd, m_cmd = map(int, time_str_cmd.split(':'))
+                if 0 <= h_cmd <= 23 and 0 <= m_cmd <= 59: hour_set_cmd = h_cmd + m_cmd/60.0
+            else: # 6am, 12pm
+                is_pm_cmd = "pm" in time_str_cmd
+                hour_val_cmd = int(time_str_cmd.replace("am","").replace("pm",""))
+                if 1 <= hour_val_cmd <= 11: hour_set_cmd = hour_val_cmd + (12 if is_pm_cmd else 0)
+                elif hour_val_cmd == 12: hour_set_cmd = 0 if not is_pm_cmd else 12 # 12am is 0, 12pm is 12
+            
+            if hour_set_cmd != -1:
+                time_fraction_cmd = hour_set_cmd / 24.0
+                start_time = time.time() - (time_fraction_cmd * full_cycle_time) # Adjust cycle start
+                print(f"Time set to ~{time_str_cmd.upper()}.")
+                update_shader_uniforms() # Refresh sky
+            else: print(f"Invalid time: {time_str_cmd}. Use HH:MM or 1-12am/pm.")
+        except ValueError: print("Time format error.")
+    elif command_verb == "tp" and len(args_cmd) == 3 and player: # Teleport
+        try:
+            player.position = Vec3(float(args_cmd[0]), float(args_cmd[1]), float(args_cmd[2]))
+            print(f"Teleported to {player.position}.")
+        except ValueError: print("Invalid coordinates for tp. Use numbers.")
+    elif command_verb == "fly" and player:
+        player.gravity = 0 if player.gravity > 0 else 1 # Toggle gravity
+        print(f"Fly mode {'activated' if player.gravity == 0 else 'deactivated'}.")
+    elif command_verb == "give" and len(args_cmd) >= 1: # Give item
+        item_name_give = args_cmd[0]
+        count_give = int(args_cmd[1]) if len(args_cmd) >= 2 and args_cmd[1].isdigit() else 1
+        if item_name_give in texture_mapping or item_name_give in [DOOR,POKEBALL,FOXFOX,PARTICLE_BLOCK]: # Check if item is known
+            for _ in range(count_give): add_item_to_inventory(item_name_give)
+            print(f"Gave {count_give} of {item_name_give}.")
+        else: print(f"Unknown item: {item_name_give}")
+    else:
+        print(f"Unknown command or incorrect arguments: '{cmd_full_str}'")
+
 
 #############################################
 # 24) Launch the Game
 #############################################
-StartMenu()
-app.run()
+if __name__ == '__main__':
+    if not os.path.exists('save'): # Ensure save directory exists
+        os.makedirs('save')
+    
+    # Set window properties before app.run() if needed
+    # window.title = 'Voxel Game Advanced'
+    # window.fullscreen = False 
+    
+    StartMenu() # Display the main menu to start
+    app.run()
