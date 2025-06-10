@@ -2166,7 +2166,7 @@ def create_game(filename=None, force_new_world=False, use_streaming_mode=False):
 
     spawn_x_player, spawn_z_player = 0.5, 0.5 
     safe_y_player = find_safe_spawn_height(world, spawn_x_player, spawn_z_player)
-    player.position = Vec3(spawn_x_player, safe_y_player, spawn_z_player)
+    player.position = Vec3(spawn_x_player, safe_y_player + 0.1, spawn_z_player) # Add a small buffer
     
     # The condition for invoke might need adjustment for robustness (float equality).
     # For syntax, it's fine.
@@ -2417,7 +2417,6 @@ def input(key_input):
                                           background_color=color.rgba(220,220,220,200))
         command_input_field.text_color = color.black
         command_input_field.placeholder = "Type command (e.g., 'fly', 'set time 14:30', 'spawn dirt 10')"
-        command_input_field.activate()
         return
 
     if not player.enabled: return 
