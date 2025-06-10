@@ -1,7 +1,7 @@
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 from ursina.prefabs.editor_camera import EditorCamera
-from ursina.ursinamath import sign, lerp
+from ursina.ursinamath import lerp
 from ursina import Func # For Button on_click
 
 import os
@@ -1000,7 +1000,7 @@ class CustomPlayer(FirstPersonController):
             self.velocity.z *= (1 - self.water_friction * time.dt)
 
             if abs(self.velocity.y) > self.max_swim_speed_vertical:
-                self.velocity.y = self.max_swim_speed_vertical * sign(self.velocity.y)
+                self.velocity.y = self.max_swim_speed_vertical * math.copysign(1, self.velocity.y)
 
             if held_keys['space']: 
                 self.velocity.y += self.swim_move_force * 0.05 * time.dt 
