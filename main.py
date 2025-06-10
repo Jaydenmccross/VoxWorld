@@ -954,8 +954,6 @@ class InventoryUI(Entity):
 class CustomPlayer(FirstPersonController):
     def __init__(self):
         super().__init__(model="character.glb", jump_height=1.5, speed=8, jump_duration=0.4) 
-        if not hasattr(self, 'velocity'):
-            self.velocity = Vec3(0,0,0)
         self.collider = BoxCollider(self, center=Vec3(0,1,0), size=Vec3(0.8,1.8,0.8)) 
         self.cursor.visible = False 
 
@@ -2413,8 +2411,9 @@ def input(key_input):
         if player: player.disable()
         mouse.locked = False; mouse.visible = True
         command_input_field = InputField(parent=camera.ui, scale_x=0.8, scale_y=0.07,
-                                          position=(0, -0.45), text_color=color.black,
+                                          position=(0, -0.45),
                                           background_color=color.rgba(220,220,220,200))
+        command_input_field.text_color = color.black
         command_input_field.placeholder = "Type command (e.g., 'fly', 'set time 14:30', 'spawn dirt 10')"
         command_input_field.activate()
         return
