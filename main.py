@@ -1166,7 +1166,7 @@ class Chunk:
         self.blocks = {} 
 
         self.opaque_terrain_entity = Entity(model=None, collider='mesh', shader=block_lighting_shader,
-                                            texture='atlas_texture.png', static=True) # Texture will be generated
+                                            texture=None, static=True) # Texture will be generated
         
         self.water_entity = Entity(model=None, texture=water_texture, 
                                    color=color.rgba(60,120,255,180), 
@@ -2171,7 +2171,7 @@ def create_game(filename=None, force_new_world=False, use_streaming_mode=False):
     invoke(lambda: setattr(player, 'y', find_safe_spawn_height(world, player.x, player.z) + 0.5) if player.y < -10 else None, delay=1.0)
 
 
-    player.model.visible = False # Keep as per brief's point 13
+    player.model.hide() # Keep as per brief's point 13
     player.rotation = (0,0,0)
     player.camera_pivot.rotation = (0,0,0) 
 
