@@ -954,6 +954,8 @@ class InventoryUI(Entity):
 class CustomPlayer(FirstPersonController):
     def __init__(self):
         super().__init__(model="character.glb", jump_height=1.5, speed=8, jump_duration=0.4) 
+        if not hasattr(self, 'velocity'):
+            self.velocity = Vec3(0,0,0)
         self.collider = BoxCollider(self, center=Vec3(0,1,0), size=Vec3(0.8,1.8,0.8)) 
         self.cursor.visible = False 
 
